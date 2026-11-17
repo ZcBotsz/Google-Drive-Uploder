@@ -1,16 +1,23 @@
 import os
 import asyncio
+import re
 from pyrogram import Client, filters
-from pyrogram.types import Message
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from config import Config
 from bot.core import database as db
 from bot.helper.gdrive import get_drive_helper
 from bot.helper.downloader import download_file
-from bot.helper.utils import humanbytes, get_id_from_url, is_gdrive_link, is_direct_link, extract_urls
+from bot.helper.utils import (
+    humanbytes, get_id_from_url, is_gdrive_link, is_direct_link, extract_urls,
+    get_caption_filename, get_unique_download_path, robust_download, progress_bar, format_time
+)
 from bot.helper.queue_manager import queue_manager
 from bot.core.logger import get_logger
 
 LOGGER = get_logger(__name__)
+
+# Lock to prevent concurrent downloads clashing on .temp files (fixes video.mp4.temp error)
+_download_lock = asyncio.Lock()
 
 def _get_file_info(message: Message):
     if message.document:
@@ -22,6 +29,8 @@ def _get_file_info(message: Message):
     if message.voice:
         return message.voice, "voice.ogg"
     if message.photo:
+        # Photo: largest size. Use message.id for uniqueness.
+        # Caption takes priority for filename (handled by caller via get_caption_filename)
         return message.photo[-1], f"photo_{message.id}.jpg"
     if message.animation:
         return message.animation, message.animation.file_name or "animation.gif"
@@ -31,7 +40,6 @@ def _get_file_info(message: Message):
 
 async def _check_auth(message: Message):
     user_id = message.from_user.id
-    # Banned check (advanced)
     if db.is_banned(user_id):
         u = db.get_user(user_id)
         reason = u.get("ban_reason", "") if u else ""
@@ -39,12 +47,10 @@ async def _check_auth(message: Message):
         return False
     u = db.get_user(user_id)
     if not u or not u.get("is_authorized"):
-        # Try owner token fallback - if owner token exists, allow
         if os.path.exists("token.pickle") or Config.USE_SERVICE_ACCOUNTS:
             return True
         await message.reply_text("❌ **Not connected!**\nRun `/connect` to authorize your Google Drive first.", quote=True)
         return False
-    # File size check (advanced)
     file_obj, _ = _get_file_info(message)
     if file_obj and file_obj.file_size:
         size_mb = file_obj.file_size / (1024*1024)
@@ -58,60 +64,72 @@ async def handle_telegram_file(client: Client, message: Message):
     if not await _check_auth(message):
         return
     user_id = message.from_user.id
-    file_obj, file_name = _get_file_info(message)
+    file_obj, original_name = _get_file_info(message)
     if not file_obj:
         return
 
-    # Check batch mode - if user is in batch mode, queue it
-    # For now, direct upload (single) + queue if multiple rapid files
+    # 🎯 Caption → Filename (e.g. "Lecture 1" caption → "Lecture 1.mp4")
+    file_name = get_caption_filename(message, original_name)
+    # Apply user's auto-rename pattern if set
+    u = db.get_user(user_id)
+    if u and u.get("auto_rename"):
+        try:
+            file_name = re.sub(u["auto_rename"], "", file_name).strip() or file_name
+        except:
+            pass
+
     folder_id, folder_name = db.get_default_folder(user_id)
-    status_msg = await message.reply_text(f"⬇️ **Downloading from Telegram...**\n📄 `{file_name}`\n📁 Target: `{folder_name}`", quote=True)
+    caption_info = f"\n🏷️ Caption: `{message.caption[:50]}`" if message.caption else ""
+    status_msg = await message.reply_text(
+        f"⬇️ **Downloading from Telegram...**\n📄 `{file_name}`{caption_info}\n📁 Target: `{folder_name}`",
+        quote=True
+    )
 
-    os.makedirs(Config.DOWNLOAD_DIR, exist_ok=True)
-    dest = os.path.join(Config.DOWNLOAD_DIR, file_name)
-    # Avoid overwrite
-    base, ext = os.path.splitext(dest)
-    counter = 1
-    while os.path.exists(dest):
-        dest = f"{base}_{counter}{ext}"
-        counter += 1
+    # Unique path per message to prevent .temp clashes (fixes video.mp4.temp error)
+    dest = get_unique_download_path(Config.DOWNLOAD_DIR, file_name, message.id)
+    # For Drive upload, use clean file_name (without _messageid suffix)
+    drive_filename = file_name
 
-    downloaded = 0
     total = file_obj.file_size or 0
-    last_edit = 0
+    start_time = asyncio.get_event_loop().time()
 
     def progress(current, total_size):
-        nonlocal downloaded, last_edit
-        downloaded = current
-        # Throttle edits
-        import time
-        now = time.time()
-        if now - last_edit < 2:
-            return
-        last_edit = now
-        pct = (current / total_size * 100) if total_size else 0
-        # Can't await in sync callback, so just update DB queue
-        pass
+        pass  # Progress shown via upload phase; download progress in logs
 
     try:
-        # Pyrogram 2.0.106: Message.download() uses file_name (not file_path)
-        await message.download(file_name=dest, progress=progress)
+        # Serialize downloads to prevent .temp file clashes (fixes concurrent download crash)
+        async with _download_lock:
+            await robust_download(message, dest, max_retries=2)
     except Exception as e:
-        LOGGER.error(f"Telegram download failed: {e}", exc_info=True)
-        await status_msg.edit_text(f"❌ **Download failed:** `{e}`")
+        LOGGER.error(f"Telegram download failed for {file_name}: {e}", exc_info=True)
+        await status_msg.edit_text(f"❌ **Download failed:**\n`{str(e)[:500]}`\n\n💡 Try again or send via Web Dashboard.")
         return
 
-    # Upload to Drive
-    await status_msg.edit_text(f"📤 **Uploading to Google Drive...**\n📄 `{file_name}`\n📁 `{folder_name}`\n💾 `{humanbytes(total)}`")
+    # Verify file exists
+    if not os.path.exists(dest):
+        await status_msg.edit_text(f"❌ **Download failed:** File not found after download.\n`{dest}`")
+        return
+
+    # Upload to Drive with beautiful progress bar
+    await status_msg.edit_text(f"📤 **Uploading to Google Drive...**\n📄 `{drive_filename}`\n📁 `{folder_name}`\n💾 `{humanbytes(total)}`")
     try:
         helper = get_drive_helper(user_id=user_id)
-        # Progress callback for upload - update message periodically via async task
-        upload_progress = {"pct": 0}
+        upload_progress = {"pct": 0, "done": 0, "total": total}
+        last_edit = [0]
+
         async def progress_updater():
             while True:
                 await asyncio.sleep(2)
                 try:
-                    await status_msg.edit_text(f"📤 **Uploading...**\n📄 `{file_name}`\n📁 `{folder_name}`\nProgress: `{upload_progress['pct']:.1f}%`")
+                    pct = upload_progress["pct"]
+                    elapsed = asyncio.get_event_loop().time() - start_time
+                    speed = upload_progress["done"] / elapsed if elapsed > 0 else 0
+                    eta = ((total - upload_progress["done"]) / speed) if speed > 0 else 0
+                    bar = progress_bar(pct, 15)
+                    await status_msg.edit_text(
+                        f"📤 **Uploading...**\n📄 `{drive_filename}`\n📁 `{folder_name}`\n"
+                        f"{bar}\n⚡ `{humanbytes(speed)}/s` • ⏱️ ETA `{format_time(eta)}`"
+                    )
                 except:
                     break
 
@@ -119,32 +137,44 @@ async def handle_telegram_file(client: Client, message: Message):
 
         def up_cb(pct, done, tot):
             upload_progress["pct"] = pct
+            upload_progress["done"] = done
+            if tot:
+                upload_progress["total"] = tot
 
-        result = helper.upload_file(dest, file_name, folder_id, up_cb)
+        result = helper.upload_file(dest, drive_filename, folder_id, up_cb)
         updater_task.cancel()
         file_id = result.get("id")
         link = result.get("webViewLink") or f"https://drive.google.com/file/d/{file_id}/view"
         size = os.path.getsize(dest)
-        db.add_upload(user_id, file_name, size, file_id, link, folder_id, source="telegram")
-        await status_msg.edit_text(f"✅ **Uploaded Successfully!**\n\n📄 [{file_name}]({link})\n📁 Folder: `{folder_name}`\n💾 Size: `{humanbytes(size)}`\n🔗 [Open in Drive]({link})")
+        db.add_upload(user_id, drive_filename, size, file_id, link, folder_id, source="telegram")
+        await status_msg.edit_text(
+            f"✅ **Uploaded Successfully!**\n\n"
+            f"📄 [{drive_filename}]({link})\n"
+            f"📁 Folder: `{folder_name}`\n"
+            f"💾 Size: `{humanbytes(size)}`\n"
+            f"🔗 [Open in Drive]({link})"
+        )
     except Exception as e:
-        LOGGER.error(f"Upload failed: {e}")
+        LOGGER.error(f"Upload failed for {drive_filename}: {e}", exc_info=True)
         await status_msg.edit_text(f"❌ **Upload failed:**\n`{str(e)[:800]}`")
     finally:
         try:
-            os.remove(dest)
+            if os.path.exists(dest):
+                os.remove(dest)
+            # Clean stale .temp
+            temp = dest + ".temp"
+            if os.path.exists(temp):
+                os.remove(temp)
         except:
             pass
 
-@Client.on_message(filters.private & filters.text & ~filters.command(["start", "help", "connect", "auth", "revoke", "folders", "setfolder", "clone", "copy", "batch", "done", "cancel", "status", "web", "auto", "search", "list", "delete", "rename", "clear"]))
+@Client.on_message(filters.private & filters.text & ~filters.command(["start", "help", "connect", "auth", "revoke", "folders", "setfolder", "clone", "copy", "batch", "done", "cancel", "status", "web", "auto", "search", "list", "delete", "rename", "clear", "ping", "test", "admin", "broadcast", "ban", "unban", "users", "restart", "logs", "health", "settings", "setting", "config", "newfolder", "mkdir", "queue", "status_queue", "clearqueue", "automation"]))
 async def handle_link_message(client: Client, message: Message):
     text = message.text.strip()
     urls = extract_urls(text)
     if not urls:
         return
-    # If waiting for auth code, skip (handled in auth.py)
     user_id = message.from_user.id
-    # Check if this looks like auth code (no http)
     if not any(is_direct_link(u) for u in urls):
         return
     if not await _check_auth(message):
@@ -152,7 +182,6 @@ async def handle_link_message(client: Client, message: Message):
 
     folder_id, folder_name = db.get_default_folder(user_id)
 
-    # Single vs Batch: if multiple URLs, queue them
     if len(urls) > 1:
         await message.reply_text(f"📦 **Batch mode:** Queued {len(urls)} links. Processing...")
         for url in urls:
@@ -162,12 +191,10 @@ async def handle_link_message(client: Client, message: Message):
         return
 
     url = urls[0]
-    # Google Drive link -> clone
     if is_gdrive_link(url):
         await handle_gdrive_clone(client, message, url)
         return
 
-    # Direct link -> download & upload
     status_msg = await message.reply_text(f"⬇️ **Downloading...**\n`{url[:100]}`", quote=True)
     os.makedirs(Config.DOWNLOAD_DIR, exist_ok=True)
     local_path = None
@@ -185,7 +212,7 @@ async def handle_link_message(client: Client, message: Message):
         db.add_upload(user_id, file_name, size, file_id, link, folder_id, source="link")
         await status_msg.edit_text(f"✅ **Uploaded!**\n\n📄 [{file_name}]({link})\n📁 Folder: `{folder_name}`\n💾 Size: `{humanbytes(size)}`")
     except Exception as e:
-        LOGGER.error(f"Link upload failed: {e}")
+        LOGGER.error(f"Link upload failed: {e}", exc_info=True)
         await status_msg.edit_text(f"❌ **Failed:**\n`{str(e)[:800]}`")
     finally:
         if local_path and os.path.exists(local_path):
@@ -218,7 +245,7 @@ async def handle_gdrive_clone(client: Client, message: Message, url: str):
             db.add_upload(user_id, name, size, result.get("id"), link, folder_id, source="gdrive_clone")
             await status_msg.edit_text(f"✅ **Cloned!**\n\n📄 [{name}]({link})\n📁 To: `{folder_name}`\n💾 Size: `{humanbytes(size)}`")
     except Exception as e:
-        LOGGER.error(f"Clone failed: {e}")
+        LOGGER.error(f"Clone failed: {e}", exc_info=True)
         await status_msg.edit_text(f"❌ **Clone failed:**\n`{str(e)[:800]}`")
 
 @Client.on_message(filters.private & filters.command(["clone", "copy"]))

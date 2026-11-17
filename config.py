@@ -64,6 +64,10 @@ class Config:
     WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
     KEEP_ALIVE = os.getenv("KEEP_ALIVE", "True").lower() == "true"  # self-ping for Render free tier
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+    # FTM-style UI
+    ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "").lstrip("@")  # e.g. your_username (for Contact Admin button)
+    CUSTOM_EMOJIS = os.getenv("CUSTOM_EMOJIS", "")  # JSON: {"upload":"5368..."} for animated emojis
+    BOT_PLAN = os.getenv("BOT_PLAN", "Free")  # Displayed in main menu (e.g. Free, Premium, 1500 files/day)
 
     OAUTH_SCOPES = [
         "https://www.googleapis.com/auth/drive",
