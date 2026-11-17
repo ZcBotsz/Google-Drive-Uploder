@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{% block title %}Telegram Drive Uploader{% endblock %}</title>
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<nav class="navbar">
+  <div class="nav-inner">
+    <a href="/" class="logo">☁️ Drive<span>Uploader</span></a>
+    <div class="nav-links">
+      <a href="/">Home</a>
+      <a href="/dashboard?user_id={{ user_id or '' }}">Dashboard</a>
+      <a href="/picker?user_id={{ user_id or '' }}">📂 Folder Picker</a>
+      <a href="/connect?user_id={{ user_id or '' }}">🔗 Connect</a>
+    </div>
+  </div>
+</nav>
+<main class="container">
+{% block content %}{% endblock %}
+</main>
+<footer class="footer">Telegram → Google Drive Uploader • Built with Pyrogram + FastAPI • Secure OAuth per-user</footer>
+<script src="/static/js/app.js"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

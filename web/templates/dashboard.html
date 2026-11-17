@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Drive Uploader{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Dashboard</h1>
+    <p class="muted">User ID: <code>{{ user_id }}</code> • Folder: <strong>{{ folder_name }}</strong> <code>{{ folder_id }}</code></p>
+  </div>
+  <div class="head-actions">
+    <a href="/picker?user_id={{ user_id }}" class="btn btn-primary">📂 Change Folder</a>
+    <a href="/connect?user_id={{ user_id }}" class="btn btn-ghost">🔗 Reconnect</a>
+  </div>
+</div>
+
+{% if not is_connected %}
+<div class="alert alert-warn">
+  <strong>⚠️ Google Drive not connected.</strong> <a href="/connect?user_id={{ user_id }}">Connect now →</a>
+</div>
+{% endif %}
+
+<div class="stats-grid">
+  <div class="stat-card"><span class="label">Total Files</span><strong>{{ stats.total_files }}</strong></div>
+  <div class="stat-card"><span class="label">Total Uploaded</span><strong>{{ humanbytes(stats.total_bytes) }}</strong></div>
+  <div class="stat-card"><span class="label">Drive Used</span><strong>{{ humanbytes(quota.usage|default(0)|int) }}</strong><small>of {{ humanbytes(quota.limit|default(0)|int) }}</small></div>
+  <div class="stat-card"><span class="label">Status</span><strong>{{ '✅ Connected' if is_connected else '❌ Offline' }}</strong></div>
+</div>
+
+<div class="two-col">
+  <div class="panel">
+    <h3>📤 Quick Upload (Web)</h3>
+    <p class="muted">Drag & drop files here — they upload directly to <strong>{{ folder_name }}</strong></p>
+    <div id="dropZone" class="dropzone">
+      <div class="dz-icon">☁️</div>
+      <p><strong>Drag & drop files</strong> or click to browse</p>
+      <input type="file" id="fileInput" multiple hidden>
+      <button class="btn btn-primary" onclick="document.getElementById('fileInput').click()">Browse Files</button>
+    </div>
+    <div id="uploadProgress"></div>
+  </div>
+
+  <div class="panel">
+    <h3>🕐 Recent Uploads</h3>
+    {% if recent %}
+    <div class="file-list">
+      {% for r in recent %}
+      <a href="{{ r.drive_link }}" target="_blank" class="file-item">
+        <span class="file-icon">📄</span>
+        <span class="file-meta"><strong>{{ r.file_name }}</strong><small>{{ humanbytes(r.file_size) }} • {{ r.source }}</small></span>
+        <span class="file-arrow">↗</span>
+      </a>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="muted">No uploads yet. Send a file in Telegram or upload here!</p>
+    {% endif %}
+  </div>
+</div>
+
+<div class="panel">
+  <h3>⚡ Quick Actions</h3>
+  <div class="actions">
+    <a href="/picker?user_id={{ user_id }}" class="btn btn-ghost">📂 Browse Folders</a>
+    <button class="btn btn-ghost" onclick="refreshStatus()">🔄 Refresh Status</button>
+    <a href="https://drive.google.com" target="_blank" class="btn btn-ghost">☁️ Open Google Drive</a>
+  </div>
+  <div id="statusBox" class="muted" style="margin-top:12px"></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+const userId = {{ user_id or 0 }};
+const folderId = "{{ folder_id }}";
+const dz = document.getElementById('dropZone');
+const fi = document.getElementById('fileInput');
+dz.addEventListener('dragover', e=>{e.preventDefault();dz.classList.add('drag')});
+dz.addEventListener('dragleave', ()=>dz.classList.remove('drag'));
+dz.addEventListener('drop', e=>{e.preventDefault();dz.classList.remove('drag');handleFiles(e.dataTransfer.files)});
+fi.addEventListener('change', ()=>handleFiles(fi.files));
+async function handleFiles(files){
+  const box=document.getElementById('uploadProgress');
+  for(const f of files){
+    const div=document.createElement('div');div.className='upload-item';div.textContent='⬆️ Uploading '+f.name+'...';box.appendChild(div);
+    const fd=new FormData();fd.append('user_id',userId);fd.append('parent_id',folderId);fd.append('file',f);
+    try{
+      const r=await fetch('/api/upload',{method:'POST',body:fd});const j=await r.json();
+      if(j.success){div.innerHTML='✅ <a href="'+j.link+'" target="_blank">'+j.name+'</a> uploaded!';}
+      else{div.textContent='❌ '+j.error;}
+    }catch(e){div.textContent='❌ '+e;}
+  }
+  setTimeout(()=>location.reload(),2000);
+}
+async function refreshStatus(){
+  const r=await fetch('/api/status?user_id='+userId);const j=await r.json();
+  document.getElementById('statusBox').textContent='Status: '+(j.is_connected?'Connected':'Not connected')+' • Files: '+j.stats.total_files+' • Folder: '+j.folder_name;
+}
+</script>
+{% endblock %}

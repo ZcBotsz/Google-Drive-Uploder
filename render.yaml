@@ -1,0 +1,66 @@
+# Render Blueprint — Telegram Drive Uploader (Advanced)
+# Docs: https://render.com/docs/blueprint-spec
+# Deploy via: Render Dashboard → New → Blueprint → Connect this repo (auto-reads this file)
+# OR manually create Web Service with settings below.
+
+services:
+  - type: web
+    name: telegram-drive-uploader
+    runtime: python
+    # Use Python 3.11 (tgcrypto wheels available)
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: PYTHONUNBUFFERED
+        value: 1
+      # --- REQUIRED: Set these in Render Dashboard (sync: false = secret, set manually) ---
+      - key: BOT_TOKEN
+        sync: false
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: OWNER_ID
+        sync: false
+      - key: ADMIN_IDS
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: WEB_BASE_URL
+        sync: false  # Set to https://<your-service>.onrender.com after first deploy
+      - key: WEB_SECRET
+        generateValue: true
+      # --- Optional ---
+      - key: USE_SERVICE_ACCOUNTS
+        value: "False"
+      - key: AUTO_SHARE
+        value: "True"
+      - key: MAX_CONCURRENT_UPLOADS
+        value: "2"
+      - key: KEEP_ALIVE
+        value: "True"
+      - key: LOG_LEVEL
+        value: "INFO"
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    healthCheckPath: /health
+    # Persistent Disk (optional but RECOMMENDED for tokens/DB survival)
+    # Uncomment below and set DATA_DIR=/opt/render/project/src/persistent in env vars
+    # disk:
+    #   name: bot-data
+    #   mountPath: /opt/render/project/src/persistent
+    #   sizeGB: 1
+    # NOTE: Free tier allows 1 disk. Without disk, tokens/DB reset on every restart/deploy.
+    # With disk, set DATA_DIR env var to /opt/render/project/src/persistent
+
+# Optional: Postgres for persistent DB (instead of SQLite on disk)
+# Uncomment if you want Postgres:
+# databases:
+#   - name: bot-db
+#     databaseName: botdb
+#     user: botuser
+#     plan: free
+# Then set DATABASE_URL in service env vars (auto-injected as DATABASE_URL)
+# NOTE: Current code uses SQLite on disk. Postgres support requires code change - disk is simpler.

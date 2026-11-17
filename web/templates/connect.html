@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Connect Google Drive{% endblock %}
+{% block content %}
+<div class="connect-wrap">
+  <div class="panel connect-card">
+    <div class="connect-icon">🔗</div>
+    <h1>Connect Google Drive</h1>
+    <p class="muted">Authorize your Google account so the bot can upload to <strong>your</strong> Drive. Each user connects their own Gmail — secure OAuth, token auto-refreshes.</p>
+
+    <div class="steps-box">
+      <div class="cstep"><span>1</span><p>Click <strong>Get Auth Link</strong> below</p></div>
+      <div class="cstep"><span>2</span><p>Sign in with your Gmail & allow Drive access</p></div>
+      <div class="cstep"><span>3</span><p>Copy the code & paste it here</p></div>
+    </div>
+
+    <div class="form-group">
+      <label>Your Telegram User ID</label>
+      <input type="number" id="uid" value="{{ user_id or '' }}" placeholder="e.g. 123456789">
+    </div>
+
+    <button class="btn btn-primary btn-block btn-lg" onclick="getAuthUrl()">🔐 Get Auth Link</button>
+    <div id="authLinkBox" style="margin-top:16px"></div>
+
+    <div class="form-group" style="margin-top:20px">
+      <label>Paste Authorization Code</label>
+      <textarea id="codeInput" rows="3" placeholder="Paste the code from Google (or full redirect URL)"></textarea>
+    </div>
+    <button class="btn btn-primary btn-block" onclick="submitCode()">✅ Connect Drive</button>
+    <div id="connectMsg" style="margin-top:12px"></div>
+
+    <p class="hint">🔒 Your token is stored only on this server in <code>tokens/{user_id}.pickle</code>. Never shared. Use <code>/revoke</code> in Telegram to disconnect anytime.</p>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+async function getAuthUrl(){
+  const uid=document.getElementById('uid').value;if(!uid)return alert('Enter User ID');
+  const box=document.getElementById('authLinkBox');box.innerHTML='<p class="muted">Generating link...</p>';
+  const r=await fetch('/api/connect_url?user_id='+uid);const j=await r.json();
+  if(j.success){box.innerHTML=`<a href="${j.auth_url}" target="_blank" class="btn btn-ghost btn-block">👉 Open Google Authorization Page ↗</a><p class="muted" style="margin-top:8px">After authorizing, copy the code and paste below.</p>`;}
+  else box.innerHTML='<p class="error">❌ '+j.error+'</p>';
+}
+async function submitCode(){
+  const uid=document.getElementById('uid').value;const code=document.getElementById('codeInput').value.trim();
+  if(!uid||!code)return alert('Enter User ID and code');
+  const msg=document.getElementById('connectMsg');msg.innerHTML='<p class="muted">Verifying...</p>';
+  const r=await fetch('/api/connect_code',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:parseInt(uid),code})});
+  const j=await r.json();
+  if(j.success){msg.innerHTML='<div class="alert alert-ok">✅ <strong>Connected!</strong> You can now upload via Telegram or Web.<br><a href="/dashboard?user_id='+uid+'">Go to Dashboard →</a> • <a href="/picker?user_id='+uid+'">Choose Folder →</a></div>';}
+  else msg.innerHTML='<p class="error">❌ '+j.error+'</p>';
+}
+</script>
+{% endblock %}

@@ -1,0 +1,16 @@
+version: "3.8"
+services:
+  bot:
+    build: .
+    container_name: telegram-drive-uploader
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./tokens:/app/tokens
+      - ./accounts:/app/accounts
+      - ./downloads:/app/downloads
+      - ./bot.db:/app/bot.db
+      - ./client_secrets.json:/app/client_secrets.json
+    ports:
+      - "8080:8080"

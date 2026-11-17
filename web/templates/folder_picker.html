@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+{% block title %}Folder Picker — Choose Upload Destination{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>📂 Choose Upload Folder</h1>
+    <p class="muted">Browse your Google Drive, search, create folders, and select where uploads should go.</p>
+  </div>
+  <div class="head-actions">
+    <button class="btn btn-ghost" onclick="goRoot()">🏠 My Drive</button>
+    <button class="btn btn-primary" onclick="confirmSelection()">✅ Use This Folder</button>
+  </div>
+</div>
+
+<div class="picker-layout">
+  <div class="panel picker-main">
+    <div class="picker-toolbar">
+      <div class="breadcrumb" id="breadcrumb"><span>🏠 My Drive</span></div>
+      <div class="toolbar-actions">
+        <input type="text" id="searchInput" placeholder="🔍 Search Drive..." onkeyup="if(event.key==='Enter')doSearch()">
+        <button class="btn btn-ghost btn-sm" onclick="doSearch()">Search</button>
+        <button class="btn btn-ghost btn-sm" onclick="showCreate()">+ New Folder</button>
+      </div>
+    </div>
+    <div id="createBox" class="create-box" style="display:none">
+      <input type="text" id="newFolderName" placeholder="Folder name...">
+      <button class="btn btn-primary btn-sm" onclick="createFolder()">Create</button>
+      <button class="btn btn-ghost btn-sm" onclick="document.getElementById('createBox').style.display='none'">Cancel</button>
+    </div>
+    <div id="folderList" class="folder-list"><p class="muted">Loading folders...</p></div>
+    <div id="fileList" class="file-list"></div>
+  </div>
+
+  <aside class="panel picker-side">
+    <h3>Selected Folder</h3>
+    <div id="selectedInfo" class="selected-info">
+      <div class="sel-icon">📁</div>
+      <strong id="selName">{{ folder_name }}</strong>
+      <code id="selId">{{ folder_id }}</code>
+      <p class="muted">This will be your default upload destination for Telegram & Web uploads.</p>
+    </div>
+    <button class="btn btn-primary btn-block" onclick="confirmSelection()">✅ Set as Upload Folder</button>
+    <div id="pickerMsg" class="muted" style="margin-top:10px"></div>
+    <hr>
+    <h4>💡 Tips</h4>
+    <ul class="tips">
+      <li>Click a folder to enter it</li>
+      <li>Click <strong>Use This Folder</strong> to select</li>
+      <li>Use <strong>+ New Folder</strong> to create</li>
+      <li>Search finds files & folders anywhere</li>
+    </ul>
+  </aside>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+const userId = {{ user_id or 0 }};
+let currentParent = "{{ folder_id }}";
+let currentName = "{{ folder_name }}";
+let historyStack = [{id: currentParent, name: currentName}];
+let selectedId = currentParent;
+let selectedName = currentName;
+
+async function loadFolders(parentId){
+  const list=document.getElementById('folderList');
+  const filesEl=document.getElementById('fileList');
+  list.innerHTML='<p class="muted">Loading...</p>'; filesEl.innerHTML='';
+  try{
+    const r=await fetch(`/api/folders?user_id=${userId}&parent_id=${parentId}`);
+    const j=await r.json();
+    if(!j.success){list.innerHTML=`<p class="error">❌ ${j.error}<br><a href="/connect?user_id=${userId}">Connect Drive →</a></p>`;return;}
+    const folders=j.folders||[];
+    if(folders.length===0){list.innerHTML='<p class="muted">📭 No folders here. Create one or upload files.</p>';}
+    else{
+      list.innerHTML=folders.map(f=>`
+        <div class="folder-item ${f.id===selectedId?'selected':''}" onclick="enterFolder('${f.id}','${f.name.replace(/'/g,"\\'")}')">
+          <span class="f-icon">📁</span>
+          <span class="f-name">${f.name}</span>
+          <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();selectFolder('${f.id}','${f.name.replace(/'/g,"\\'")}')">Select</button>
+        </div>`).join('');
+    }
+    // Load files too
+    const rf=await fetch(`/api/files?user_id=${userId}&parent_id=${parentId}`);
+    const jf=await rf.json();
+    if(jf.success && jf.files.length){
+      filesEl.innerHTML='<h4 style="margin:16px 0 8px">Files</h4>'+jf.files.filter(f=>f.mimeType!=='application/vnd.google-apps.folder').slice(0,20).map(f=>`
+        <a href="${f.webViewLink||'#'}" target="_blank" class="file-item"><span>📄</span><span>${f.name}</span></a>`).join('');
+    }
+    updateBreadcrumb();
+  }catch(e){list.innerHTML='<p class="error">❌ '+e+'</p>';}
+}
+function enterFolder(id,name){
+  historyStack.push({id,name}); currentParent=id; currentName=name; selectedId=id; selectedName=name; updateSelected(); loadFolders(id);
+}
+function selectFolder(id,name){selectedId=id;selectedName=name;updateSelected();document.querySelectorAll('.folder-item').forEach(el=>el.classList.remove('selected'));}
+function updateSelected(){document.getElementById('selName').textContent=selectedName;document.getElementById('selId').textContent=selectedId;}
+function updateBreadcrumb(){
+  document.getElementById('breadcrumb').innerHTML=historyStack.map((h,i)=>`<span onclick="jumpTo(${i})" style="cursor:pointer">${i===0?'🏠':''} ${h.name}</span>`).join(' <span class="sep">›</span> ');
+}
+function jumpTo(i){historyStack=historyStack.slice(0,i+1);const h=historyStack[i];currentParent=h.id;currentName=h.name;selectedId=h.id;selectedName=h.name;updateSelected();loadFolders(h.id);}
+function goRoot(){historyStack=[{id:'root',name:'My Drive'}];currentParent='root';currentName='My Drive';selectedId='root';selectedName='My Drive';updateSelected();loadFolders('root');}
+function showCreate(){document.getElementById('createBox').style.display='flex';document.getElementById('newFolderName').focus();}
+async function createFolder(){
+  const name=document.getElementById('newFolderName').value.trim();if(!name)return alert('Enter folder name');
+  const r=await fetch('/api/create_folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:userId,name,parent_id:currentParent})});
+  const j=await r.json();
+  if(j.success){document.getElementById('createBox').style.display='none';document.getElementById('newFolderName').value='';loadFolders(currentParent);alert('✅ Folder created: '+name);}
+  else alert('❌ '+j.error);
+}
+async function doSearch(){
+  const q=document.getElementById('searchInput').value.trim();if(!q)return;
+  const list=document.getElementById('folderList');list.innerHTML='<p class="muted">Searching...</p>';
+  const r=await fetch(`/api/search?user_id=${userId}&q=${encodeURIComponent(q)}`);const j=await r.json();
+  if(!j.success){list.innerHTML='<p class="error">❌ '+j.error+'</p>';return;}
+  const res=j.results||[];
+  list.innerHTML=res.length?res.map(f=>`<div class="folder-item" onclick="selectFolder('${f.id}','${f.name.replace(/'/g,"\\'")}')"><span>${f.mimeType==='application/vnd.google-apps.folder'?'📁':'📄'}</span><span>${f.name}</span><a href="${f.webViewLink||'#'}" target="_blank" class="btn btn-ghost btn-sm">Open ↗</a></div>`).join(''):'<p class="muted">No results</p>';
+}
+async function confirmSelection(){
+  const msg=document.getElementById('pickerMsg');msg.textContent='Saving...';
+  const r=await fetch('/api/set_folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:userId,folder_id:selectedId,folder_name:selectedName})});
+  const j=await r.json();
+  if(j.success){msg.innerHTML='✅ <strong>Saved!</strong> Uploads will go to <strong>'+j.folder_name+'</strong><br><a href="/dashboard?user_id='+userId+'">Go to Dashboard →</a>';}
+  else msg.textContent='❌ '+j.error;
+}
+loadFolders(currentParent);
+</script>
+{% endblock %}
