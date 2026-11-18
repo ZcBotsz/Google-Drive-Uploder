@@ -674,5 +674,9 @@ async def cmd_plan(msg: Message, **data):
     if plan.get("expires_at"):
         text += f"\n⏳ valid till {unlock_at_text(plan['expires_at'], app.cfg.timezone)}"
     else:
-        text += f"\nUpgrade: {esc(g.get('plan_price_text') or app.cfg.plan_price_text)}"
+        text += ("\n\n⭐ <b>MAX · ₹499 / month</b>"
+                 "\nUp to 750 GB daily plan allowance · up to 4 concurrent jobs"
+                 "\nUp to 5,000 files per job · deployment-configured file ceiling"
+                 "\nStorage remains subject to your Google account quota."
+                 "\nContact: @ZCQXx")
     await msg.answer(text)

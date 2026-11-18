@@ -434,8 +434,10 @@ async def test_admin_pages_render(web):
 async def test_homepage_shows_the_zc_driveup_landing_site(web):
     r = await web["client"].get("/")
     assert r.status_code == 200
-    assert "Move files to Drive." in r.text and "Keep your flow." in r.text
-    assert "/studio" in r.text and "/connect" in r.text
+    assert "ZC DRIVE UPLOAD" in r.text and "Send it once." in r.text
+    assert "Telegram → Server" in r.text and "Server → Drive" in r.text
+    assert "₹499" in r.text and "up to 750 GB/day" in r.text
+    assert "/studio" in r.text and "@ZCQXx" in r.text
 
 
 async def test_studio_without_session_explains_how_to_open(web):

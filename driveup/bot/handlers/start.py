@@ -70,6 +70,8 @@ async def cmd_start(msg: Message, **data):
         # Every command is a button — nobody should have to remember /syntax.
         from ..menus import quick_kb
         kb = quick_kb(is_admin=data.get("role") in ("owner", "admin", "support"))
+    from ..ui import emoji as animated
+    welcome = animated.apply(welcome, app.cfg, await repo.get_global(app.db))
     await msg.answer(welcome, reply_markup=kb)
     await repo.audit(app.db, user["user_id"], "bot.start")
     await app.log_event("#NewUser", {"id": user["user_id"], "name": user.get("name", "")})
@@ -285,16 +287,16 @@ async def cmd_account(msg: Message, **data):
         free = human_bytes(about["free"]) if about["free"] >= 0 else "unlimited"
         total = human_bytes(about["limit"]) if about["limit"] else "—"
     except Exception as e:                                # noqa: BLE001
-        free, total = "?"
+        free, total = "?", "?"
 
     lines = [
-        f"<b>👤 Account</b>",
-        f"📧 {esc(acc['email'])}" + ("  ⚠️ reconnect" if acc.get("needs_reconnect") else ""),
-        f"💾 free: <b>{free}</b> of {total}",
-        f"💎 plan: <b>{esc(plan.get('name') or plan.get('id'))}</b>"
-        + (f" · till {unlock_at_text(plan['expires_at'], app.cfg.timezone)}" if plan.get("expires_at") else ""),
-        f"📅 today: {human_bytes(usage['bytes'])} / {plan.get('daily_gb')} GB",
-        f"🔐 scope: {'full Drive' if app.cfg.scope_mode_full else 'app-created files only'}",
+        f"<b>👤 {sc('ACCOUNT OVERVIEW')}</b>",
+        f"📧 {sc('GOOGLE ACCOUNT')}: <b>{esc(acc['email'])}</b>" + (f"  ⚠️ {sc('RECONNECT NEEDED')}" if acc.get("needs_reconnect") else ""),
+        f"💾 {sc('DRIVE SPACE')}: <b>{free} free</b> of {total}",
+        f"💎 {sc('PLAN')}: <b>{esc(plan.get('name') or plan.get('id'))}</b>"
+        + (f" · {sc('UNTIL')} {unlock_at_text(plan['expires_at'], app.cfg.timezone)}" if plan.get("expires_at") else ""),
+        f"📅 {sc('TODAY')}: {human_bytes(usage['bytes'])} / {plan.get('daily_gb')} GB",
+        f"🔐 {sc('DRIVE ACCESS')}: {'full Drive' if app.cfg.scope_mode_full else 'app-created files only'}",
     ]
     if lock:
         lines.append(f"🔒 locked until {unlock_at_text(lock['expires_at'], app.cfg.timezone)}")

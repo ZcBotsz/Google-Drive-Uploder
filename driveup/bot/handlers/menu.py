@@ -42,18 +42,23 @@ async def is_admin_user(app, user_id: int, data: dict) -> bool:
 async def cmd_hello(msg: Message, **data):
     app = data["_app"]
     admin = await is_admin_user(app, msg.from_user.id, data)
-    await msg.answer(
+    from ..ui import emoji as animated
+    text = (
         f"👋 <b>Hello — {sc('WELCOME TO ZC DRIVEUP')}</b>\n\n"
         "Send a Telegram file or direct link. I’ll guide you through the destination, "
-        "naming and upload — use the menu buttons for the rest.",
-        reply_markup=main_menu_kb(is_admin=admin))
+        "naming and upload — use the menu buttons for the rest."
+    )
+    text = animated.apply(text, app.cfg, await repo.get_global(app.db))
+    await msg.answer(text, reply_markup=main_menu_kb(is_admin=admin))
 
 
 @router.message(Command("menu"))
 async def cmd_menu(msg: Message, **data):
     app = data["_app"]
     admin = await is_admin_user(app, msg.from_user.id, data)
-    await msg.answer(MAIN_TEXT, reply_markup=main_menu_kb(is_admin=admin))
+    from ..ui import emoji as animated
+    text = animated.apply(MAIN_TEXT, app.cfg, await repo.get_global(app.db))
+    await msg.answer(text, reply_markup=main_menu_kb(is_admin=admin))
 
 
 @router.callback_query(F.data == "m:noop")
@@ -75,7 +80,9 @@ async def cb_home(call: CallbackQuery, **data):
     app = data["_app"]
     admin = await is_admin_user(app, call.from_user.id, data)
     await call.answer()
-    await _edit_menu(call, MAIN_TEXT, main_menu_kb(is_admin=admin))
+    from ..ui import emoji as animated
+    text = animated.apply(MAIN_TEXT, app.cfg, await repo.get_global(app.db))
+    await _edit_menu(call, text, main_menu_kb(is_admin=admin))
 
 
 @router.callback_query(F.data.startswith("ui:"))
@@ -97,7 +104,9 @@ async def cb_section(call: CallbackQuery, **data):
     if not screen:
         return await call.answer()
     await call.answer()
-    await _edit_menu(call, screen[0], screen[1])
+    from ..ui import emoji as animated
+    text = animated.apply(screen[0], app.cfg, await repo.get_global(app.db))
+    await _edit_menu(call, text, screen[1])
 
 
 class _MenuMessageProxy:

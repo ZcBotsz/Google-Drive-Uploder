@@ -177,11 +177,11 @@ DEFAULT_GLOBAL = {
     "lock_channel_id": "",
     "support_contact": "@ZCQXx",
     "brand_name": BRAND_NAME,
-    "plan_price_text": "₹99 / month",
+    "plan_price_text": "Max · ₹499 / month",
     "default_max_file_mb": 2000,
     "allowed_types": "",
     "chunk_mb": 8,
-    "animated_emoji": False,
+    "animated_emoji": True,
     "features": {"web_studio": True, "bulk_jobs": True, "shared_drives": True,
                  "large_files_2gb": True, "custom_naming": True, "presets": True},
 }
