@@ -246,8 +246,9 @@ async def test_a_video_creates_a_job_card(botenv):
     # the card carries the six buttons from B1
     kb = botenv["sess"].last()["reply_markup"]["inline_keyboard"]
     labels = " ".join(b["text"] for row in kb for b in row)
+    from driveup.strings import sc
     for word in ("folder", "Naming", "Sequence", "Start", "Upload Studio", "Cancel"):
-        assert word.lower() in labels.lower()
+        assert sc(word).lower() in labels.lower()
 
 
 async def test_the_same_file_twice_is_deduped(botenv):
@@ -439,7 +440,8 @@ async def test_admin_broadcast_needs_confirmation(botenv):
     kb = botenv["sess"].last().get("reply_markup") or {}
     assert "send to" in said(botenv).lower()
     flat = [b for row in kb.get("inline_keyboard", []) for b in row]
-    assert any("confirm" in b["text"].lower() for b in flat)
+    from driveup.strings import sc
+    assert any(sc("confirm") in b["text"].lower() for b in flat)
 
 
 async def test_admin_system_and_audit_and_export(botenv):

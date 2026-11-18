@@ -369,6 +369,10 @@ async def test_admin_owner_can_read_and_write(web):
                      headers={"X-CSRF": csrf})
     assert ok.status_code == 200
     assert (await repo.get_global(web["db"]))["brand_name"] == "DriveUpPro"
+    saved = await c.put("/admin/api/settings", json={"dump_channel_id": "-1001234567890"},
+                        headers={"X-CSRF": csrf})
+    assert saved.status_code == 200
+    assert (await repo.get_global(web["db"]))["dump_channel_id"] == "-1001234567890"
 
 
 async def test_admin_lock_unlock_flow_is_audited(web):

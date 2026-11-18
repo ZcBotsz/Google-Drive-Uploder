@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from aiogram.types import InlineKeyboardButton as B
+from .ui.buttons import auto as B
 from aiogram.types import InlineKeyboardMarkup as KM
 
 # (command, emoji, label). Order is the order a new user needs things.
@@ -82,10 +82,21 @@ def _rows(entries: Iterable[tuple[str, str, str]], per_row: int = 2) -> list[lis
 
 
 def main_menu_kb(*, is_admin: bool = False, lang: str = "en") -> KM:
-    """The whole command surface as buttons."""
-    rows = _rows(USER_MENU, per_row=2)
+    """Phone-first command surface, grouped by the task users came to do."""
+    groups = [
+        ("START HERE", {"connect", "account", "disconnect", "plan", "mystats"}),
+        ("GOOGLE DRIVE", {"storage", "folders", "setfolder", "copy"}),
+        ("UPLOADS", {"naming", "sequence", "queue", "history", "export", "cancel"}),
+        ("TOOLS & SETTINGS", {"thumb_set", "thumb", "delthumb", "settings", "studio", "help", "hello"}),
+    ]
+    rows: list[list[B]] = []
+    for heading, commands in groups:
+        entries = [e for e in USER_MENU if e[0] in commands]
+        if entries:
+            rows.append([B(text=f"• {heading}", callback_data="m:noop")])
+            rows.extend(_rows(entries, per_row=2))
     if is_admin:
-        rows.append([B(text="━━━ 🛡 ADMIN ━━━", callback_data="m:noop")])
+        rows.append([B(text="ADMIN CONTROL CENTER", callback_data="m:noop")])
         rows.extend(_rows(ADMIN_MENU, per_row=2))
     return KM(inline_keyboard=rows)
 

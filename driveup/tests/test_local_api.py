@@ -156,6 +156,12 @@ def test_file_server_moves_to_its_own_port(base, expected):
     assert _with_file_port(base, "8081", "8080") == expected
 
 
+def test_render_duplicate_hostport_routes_downloads_to_file_server_port():
+    from driveup.bot.client import _files_port
+    assert _files_port("driveup-tg-api-abc:8081", "driveup-tg-api-abc:8081") == "8080"
+    assert _files_port("driveup-tg-api-abc:8081", "driveup-tg-api-abc:8080") == "8080"
+
+
 def test_hostport_value_becomes_a_working_file_url():
     from types import SimpleNamespace
     from driveup.tg.download import file_server_url

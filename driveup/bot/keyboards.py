@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Iterable, Optional
 
-from aiogram.types import InlineKeyboardButton as B
+from .ui.buttons import auto as B
 from aiogram.types import InlineKeyboardMarkup as KM
 
 from ..strings import t

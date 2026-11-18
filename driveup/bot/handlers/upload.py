@@ -8,7 +8,8 @@ from typing import Optional
 
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, InlineKeyboardButton as B
+from aiogram.types import CallbackQuery
+from ..ui.buttons import auto as B
 from aiogram.types import InlineKeyboardMarkup as KM
 from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.types import Message

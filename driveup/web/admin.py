@@ -491,7 +491,7 @@ async def put_settings(request: Request, body: dict = Body(...), user=Depends(ad
         return g
     allowed = {"maintenance", "maintenance_msg", "registration", "welcome_text",
                "filename_tag", "filename_tag_enabled", "progress_style",
-               "force_sub_channels", "log_channel_id", "lock_channel_id",
+               "force_sub_channels", "log_channel_id", "dump_channel_id", "lock_channel_id",
                "support_contact", "brand_name", "plan_price_text",
                "default_max_file_mb", "allowed_types", "chunk_mb", "animated_emoji",
                "features"}

@@ -258,6 +258,22 @@ const humanBytes = (n) => { n = Number(n||0); if (n<1024) return n+' B';
   const u=['KB','MB','GB','TB']; let i=-1; do { n/=1024; i++; } while (n>=1024 && i<u.length-1);
   return n.toFixed(n<10?2:1)+' '+u[i]; };
 const when = (ts) => ts ? new Date(ts*1000).toLocaleString() : '—';
+function tintAdminButtons(root=document) {
+  const nodes = root.matches?.('button.btn, a.btn')
+    ? [root, ...root.querySelectorAll('button.btn, a.btn')]
+    : (root.querySelectorAll?.('button.btn, a.btn') || []);
+  nodes.forEach(b => {
+    b.classList.remove('primary','success','danger');
+    const label = `${b.textContent||''} ${b.title||''} ${b.id||''}`.toLowerCase();
+    if (/delete|remove|disconnect|revoke|purge|clear|lock/.test(label)) b.classList.add('danger');
+    else if (/save|send|grant|resume|unlock|confirm|export|load|search|test/.test(label)) b.classList.add('success');
+    else b.classList.add('primary');
+  });
+}
+tintAdminButtons();
+new MutationObserver(records => records.forEach(r => r.addedNodes.forEach(n => {
+  if (n.nodeType === 1) tintAdminButtons(n);
+}))).observe(document.body,{childList:true,subtree:true});
 
 // ── boot ────────────────────────────────────────────────────────────────
 async function boot() {
@@ -494,6 +510,7 @@ const SETTING_FIELDS = [
   ['maintenance_msg', 'Maintenance message', 'text'],
   ['force_sub_channels', 'Force-sub channels (comma)', 'text'],
   ['log_channel_id', 'Log channel id', 'text'],
+  ['dump_channel_id', 'Dump channel id', 'text'],
   ['lock_channel_id', 'Lock channel id', 'text'],
   ['filename_tag', 'Filename tag', 'text'],
   ['progress_style', 'Progress style', 'select:classic,striped,glow,segmented'],

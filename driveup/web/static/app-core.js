@@ -156,6 +156,28 @@ function go(step, back = false) {
 }
 
 // ── render root ─────────────────────────────────────────────────────────────
+function tintButtons(root = document) {
+  const terms = (node) => `${node.textContent || ''} ${node.title || ''} ${node.id || ''}`.toLowerCase();
+  const candidates = root.matches?.('button.btn, a.btn')
+    ? [root, ...root.querySelectorAll('button.btn, a.btn')]
+    : (root.querySelectorAll?.('button.btn, a.btn') || []);
+  candidates.forEach((node) => {
+    node.classList.remove('primary', 'success', 'danger');
+    const label = terms(node);
+    if (/cancel|delete|remove|disconnect|clear|stop|danger/.test(label)) node.classList.add('danger');
+    else if (/start|upload|connect|confirm|save|retry|resume|share|next|apply|open folder/.test(label)) node.classList.add('success');
+    else node.classList.add('primary');
+  });
+}
+
+// App views are rendered dynamically; tint new buttons as they enter the DOM.
+const tintObserver = new MutationObserver((records) => {
+  for (const record of records) for (const node of record.addedNodes) {
+    if (node.nodeType === 1) tintButtons(node);
+  }
+});
+if (document.body) tintObserver.observe(document.body, { childList: true, subtree: true });
+
 function render(back = false) {
   renderSteps();
   const view = $('#view');

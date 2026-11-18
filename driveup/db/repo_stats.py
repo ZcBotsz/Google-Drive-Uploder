@@ -165,6 +165,7 @@ DEFAULT_GLOBAL = {
     "progress_style": "glow",
     "force_sub_channels": "",
     "log_channel_id": "",
+    "dump_channel_id": "",
     "lock_channel_id": "",
     "support_contact": "@ZCQXx",
     "brand_name": BRAND_NAME,

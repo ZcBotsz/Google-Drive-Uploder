@@ -23,6 +23,7 @@ import logging
 import time
 
 from ..bot.ui.cards import progress_card
+from ..bot.ui import emoji as emoji_ui
 from ..tg.ratelimit import safe_edit
 
 log = logging.getLogger("driveup.animator")
@@ -48,7 +49,7 @@ class Animator:
     # ── the picture, from the live state ────────────────────────────────
     def render(self) -> str:
         s = self.state
-        return progress_card(
+        text = progress_card(
             index=s.index, count=s.count, name=s.name, folder=s.folder,
             tg_pct=s.tg_pct, drive_pct=s.drive_pct, done=s.done, total=s.total,
             speed=s.speed, elapsed=s.elapsed, eta=s.eta, retries=s.retries,
@@ -58,6 +59,7 @@ class Animator:
             paused=bool(getattr(s, "paused", False)),
             stage_label=self._stage_label(),
         )
+        return emoji_ui.apply(text, self.cfg)
 
     def _stage_label(self) -> str:
         stage = getattr(self.state, "stage", "") or ""

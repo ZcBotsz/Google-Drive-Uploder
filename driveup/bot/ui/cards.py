@@ -10,21 +10,21 @@ from typing import Iterable, Optional
 from ...core.naming import human_size
 from ...strings import esc, sc
 
-BAR_FULL = "█"
-BAR_EMPTY = "░"
-SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+# ASCII progress glyphs render consistently in Telegram Desktop, Android and
+# web fonts (the previous block/braille glyphs showed as empty boxes on some phones).
+BAR_FULL = "#"
+BAR_EMPTY = "-"
+SPINNER = "|/-\\"
 STYLES = {
     "classic": (BAR_FULL, BAR_EMPTY),
-    "striped": ("▓", "░"),
-    "glow": ("█", "░"),
-    "segmented": ("▰", "▱"),
+    "striped": ("=", "."),
+    "glow": ("#", "-"),
+    "segmented": ("=", "."),
 }
 
-# A moving head makes the bar look alive even when the percentage has not
-# changed yet — which is exactly the case a user judges "is it working?" by.
-HEADS = "▏▎▍▌▋▊▉█"
-PULSE = "◐◓◑◒"
-DOTS = "·•●•"
+HEADS = "><"
+PULSE = "|/-\\"
+DOTS = "..."
 
 # A tiny zip-file "runner" that walks along under the bars, frame by frame.
 RUNNER = ("🏃", "🏃‍♂️", "🏃", "🏃‍♂️")
@@ -136,25 +136,25 @@ def progress_card(*, index: int, count: int, name: str, folder: str,
     # a ten-cell "fuel gauge" that fills with the overall percentage
     gauge = bar(pct_big, 10, style, frame)
     lines = [
-        f"╭━━━〔 {pl} {title} {dt} 〕━━━╮",
-        f"│ {sp} 📄 {esc(shorten(name, 42))}",
-        f"│ 🗂 {esc(shorten(folder, 44))}",
-        "├───────────────────────────────────",
-        f"│ ⬇️ {sc('telegram → server')}",
-        f"│    [{bar(tg_pct, 20, style, frame)}] {tg_pct:5.1f}%",
-        f"│ ⬆️ {sc('server → drive')}",
-        f"│    [{bar(drive_pct, 20, style, frame + 3)}] {drive_pct:5.1f}%",
-        "├───────────────────────────────────",
-        f"│ {runner(frame, overall_pct)}",
-        f"│ 📦 {human_size(done)} / {human_size(total)}",
-        f"│ 📉 {sc('left')} {human_size(left)}   ⚡ {speed_text(speed)}",
-        f"│ ⏱ {human_secs(elapsed)}   ⏳ {sc('eta')} {eta_txt}",
-        f"│ 🔁 {sc('retries')} {retries}   🧵 {chunk_mb} MB   📚 {index}/{count}",
-        "├───────────────────────────────────",
-        f"│ {gauge} {pct_big:3.0f}%  {sc('overall')}",
-        f"╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯",
+        f"📄 {esc(shorten(name, 42))}",
+        f"📁 {esc(shorten(folder, 44))}",
+        "",
+        f"⬇️ {sc('telegram → server')}",
+        f"[{bar(tg_pct, 20, style, frame)}] {tg_pct:5.1f}%",
+        f"⬆️ {sc('server → drive')}",
+        f"[{bar(drive_pct, 20, style, frame + 3)}] {drive_pct:5.1f}%",
+        "",
+        f"{runner(frame, overall_pct)}",
+        f"📦 {human_size(done)} / {human_size(total)}",
+        f"{sc('left')} {human_size(left)}   ⚡ {speed_text(speed)}",
+        f"{human_secs(elapsed)}   {sc('eta')} {eta_txt}",
+        f"{sc('retries')} {retries}   {chunk_mb} MB   {index}/{count}",
+        "",
+        f"[{gauge}] {pct_big:3.0f}%  {sc('overall')}",
     ]
-    return "<pre>" + "\n".join(lines) + "</pre>"
+    # Keep the heading outside <pre>: Telegram renders custom emoji tags in the
+    # caption/header, while the ASCII progress bars remain monospaced and legible.
+    return f"🚀 <b>{esc(title)}</b> {dt}\n<pre>" + "\n".join(lines) + "</pre>"
 
 
 def shorten(text: str, n: int) -> str:

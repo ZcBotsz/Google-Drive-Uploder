@@ -81,6 +81,8 @@ class BotApp:
 
     async def say(self, chat_id: int, text: str, **kw) -> Optional[int]:
         try:
+            from .ui import emoji as emoji_ui
+            text = emoji_ui.apply(text, self.cfg, await repo.get_global(self.db))
             msg = await self.bot.send_message(chat_id, text, parse_mode="HTML",
                                               disable_web_page_preview=True, **kw)
             return msg.message_id
@@ -292,6 +294,19 @@ def _port_of(url: str) -> str:
     return "443" if text.startswith("https") else "80"
 
 
+def _files_port(api_url: str, files_url: str) -> str:
+    """Resolve Render's shared `hostport` to its separate file-server port.
+
+    The gramiojs image exposes Telegram's API on 8081 and its token-less file
+    endpoint on 8080. Render's two `fromService: hostport` references both
+    inject `host:8081`, so detect that duplicate and route file fetches to 8080.
+    An explicitly configured `host:8080` remains untouched.
+    """
+    api_port = _port_of(api_url)
+    file_port = _port_of(files_url) or "8080"
+    return "8080" if api_port == "8081" and file_port == api_port else file_port
+
+
 def build_bot(cfg: Settings) -> Bot:
     session = ConflictAwareSession(
         api=TelegramAPIServer.from_base(cfg.api_base),
@@ -308,7 +323,7 @@ def build_bot(cfg: Settings) -> Bot:
     # Ports differ on the gramiojs image (API 8081, file server 8080); a host
     # that injects one host:port has to be corrected for downloads.
     bot.api_port = _port_of(cfg.api_base)
-    bot.files_port = _port_of(cfg.telegram_files_url) or "8080"
+    bot.files_port = _files_port(cfg.api_base, cfg.telegram_files_url)
     return bot
 
 

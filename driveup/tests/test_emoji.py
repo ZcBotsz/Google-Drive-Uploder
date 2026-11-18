@@ -14,7 +14,7 @@ import pytest
 
 from driveup.bot.ui import emoji as E
 from driveup.bot.ui import emoji_ids
-from driveup.bot.ui.buttons import danger, plain, primary, styled, success
+from driveup.bot.ui.buttons import auto, danger, plain, primary, styled, success
 
 
 @pytest.fixture(autouse=True)
@@ -116,6 +116,13 @@ def test_an_invalid_style_is_dropped_not_sent():
 def test_button_carries_an_animated_icon():
     b = primary("Open", url="https://x.test")
     assert b.icon_custom_emoji_id == emoji_ids.FREE["🌐"]
+
+
+def test_auto_button_uses_semantic_colour_custom_icon_and_small_caps():
+    b = auto("❌ Cancel job", callback_data="v1:cancel")
+    assert b.style == "danger"
+    assert b.icon_custom_emoji_id == emoji_ids.CATALOGUE["❌"]
+    assert "ᴄᴀɴᴄᴇʟ" in b.text
 
 
 def test_unknown_icon_degrades_to_none():

@@ -11,6 +11,7 @@ import asyncio
 import pytest
 
 from driveup.bot.ui.cards import bar, dots, progress_card, pulse, runner, spinner
+from driveup.strings import sc
 from driveup.core.progress import ProgressState
 
 
@@ -23,6 +24,9 @@ def test_two_consecutive_frames_differ():
     c = progress_card(frame=5, **kw)
     assert a != b, "frame 0 and 1 are identical — nothing animates"
     assert a != c
+    assert sc("telegram → server") in a
+    assert sc("server → drive") in a
+    assert "█" not in a and "╭" not in a and "░" not in a
 
 
 def test_the_bar_head_walks_within_a_whole_percentage():

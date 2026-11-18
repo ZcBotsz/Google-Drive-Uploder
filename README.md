@@ -28,7 +28,7 @@ Telegram ──▶ Bot (aiogram 3) ──▶ worker pool ──▶ Google Drive
 | **Uploads** | Resumable sessions, md5 verification, duplicate policy (rename/skip/overwrite), 750 GB/day guard, resume after a restart |
 | **Access** | OAuth (offline + consent + PKCE), encrypted refresh tokens, per-plan quotas, locks with TTL, force-sub |
 | **Admin** | 9 pages: dashboard, users, jobs/queue, locks, plans, broadcast, settings, audit, danger zone |
-| **Polish** | 4 progress styles, braille spinner, reduced-motion, ARIA live regions, i18n (en/hi), keyboard shortcuts |
+| **Polish** | 4 progress styles, portable animated ASCII progress track, reduced-motion, ARIA live regions, i18n (en/hi), keyboard shortcuts, grouped small-caps Telegram menus, semantic coloured inline buttons with animated custom-emoji icons |
 
 ---
 

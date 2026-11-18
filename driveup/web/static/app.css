@@ -123,6 +123,7 @@ small, .dim { color: var(--dim); font-size: 0.82rem; }
   background: var(--surface-3);
   color: var(--txt);
   font: inherit; font-size: 0.94rem; font-weight: 600;
+  font-variant-caps: all-small-caps; letter-spacing: 0.025em;
   cursor: pointer;
   transition: transform var(--fast) var(--ease), background var(--fast) var(--ease),
               border-color var(--fast) var(--ease), box-shadow var(--fast) var(--ease);
@@ -137,6 +138,12 @@ small, .dim { color: var(--dim); font-size: 0.82rem; }
   border-color: transparent; color: #04222a; font-weight: 800;
 }
 .btn.primary:hover { filter: brightness(1.06); }
+.btn.success {
+  background: linear-gradient(135deg, #34d399, #14b8a6);
+  border-color: transparent; color: #03251f; font-weight: 800;
+  box-shadow: 0 4px 16px rgba(20, 184, 166, 0.18);
+}
+.btn.success:hover { filter: brightness(1.06); box-shadow: 0 0 20px rgba(20, 184, 166, 0.32); }
 .btn.ghost { background: transparent; }
 .btn.danger { border-color: rgba(255, 107, 107, 0.5); color: var(--danger); background: rgba(255, 107, 107, 0.07); }
 .btn.danger:hover { box-shadow: 0 0 20px rgba(255, 107, 107, 0.3); border-color: var(--danger); }

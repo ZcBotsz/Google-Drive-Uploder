@@ -42,6 +42,8 @@ def styled(text: str, *, style: Optional[str] = None, icon: Optional[str] = None
     Extra keyword arguments (`callback_data`, `url`, `web_app`, …) are passed
     through untouched — exactly one of them may be set, as Telegram requires.
     """
+    from ...strings import sc
+    text = sc(str(text))
     kwargs = {k: v for k, v in kwargs.items() if v is not None}
     clean = style if style in VALID_STYLES else None
     icon_id = emoji_ids.CATALOGUE.get(icon or _DEFAULT_ICON.get(clean or "", ""), None)
@@ -70,3 +72,23 @@ def danger(text: str, icon: Optional[str] = "❌", **kw) -> B:
 
 def plain(text: str, **kw) -> B:
     return styled(text, **kw)
+
+
+def auto(text: str, **kw) -> B:
+    """Apply a semantic colour, a matching custom icon, and brand typography.
+
+    Danger actions are red, affirmative actions green, and navigation/actions
+    blue. Unknown icon/style fields safely degrade through `styled()`.
+    """
+    from ...strings import sc
+    raw = str(text)
+    lower = raw.casefold()
+    if any(word in lower for word in ("cancel", "delete", "disconnect", "remove", "clear", "revoke", "no", "stop")):
+        style = "danger"
+    elif any(word in lower for word in ("start", "upload", "connect", "confirm", "yes", "save", "retry", "resume", "joined", "apply")):
+        style = "success"
+    else:
+        style = "primary"
+    icon = next((char for char in sorted(emoji_ids.CATALOGUE, key=len, reverse=True)
+                 if char in raw), None)
+    return styled(sc(raw), style=style, icon=icon, **kw)
