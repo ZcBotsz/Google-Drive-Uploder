@@ -1,7 +1,9 @@
 """FastAPI application — Studio, admin, API, static, security headers."""
 from __future__ import annotations
 
+import html
 import logging
+import re
 import time
 from pathlib import Path
 
@@ -148,7 +150,7 @@ def create_app(*, db, cfg: Settings, bot, worker, accounts, access, hub=None,
                                  request.client.host if request.client else "",
                                  request.headers.get("user-agent", ""))
         proto = request.headers.get("x-forwarded-proto", request.url.scheme).split(",")[0].strip()
-        target = "/admin" if claim["admin"] or to == "admin" else "/"
+        target = "/admin" if claim["admin"] or to == "admin" else "/studio"
         if job:
             target += f"?job={job}"
         resp = RedirectResponse(target, status_code=303)
@@ -177,24 +179,36 @@ def create_app(*, db, cfg: Settings, bot, worker, accounts, access, hub=None,
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
-        """Studio, but only with a session — otherwise explain how to get one."""
+        """Public ZC DriveUp homepage, styled after the user's supplied design."""
+        home = STATIC / "home.html"
+        if not home.exists():
+            return HTMLResponse(f"<h1>{html.escape(BRAND_NAME)}</h1><a href='/studio'>Open Studio</a>")
+        username = (request.app.state.cfg.login_widget_bot_username or "").strip().lstrip("@")
+        bot_link = f"https://t.me/{username}?start=studio" if re.fullmatch(r"[A-Za-z0-9_]{5,32}", username) else "/studio"
+        body = home.read_text(encoding="utf-8").replace("{{BOT_LINK}}", html.escape(bot_link, quote=True))
+        return HTMLResponse(body, status_code=200)
+
+    @app.get("/studio", response_class=HTMLResponse)
+    async def studio(request: Request):
+        """Private transfer workspace. Bot-signed links land here after redemption."""
         sid = request.cookies.get("du_session")
-        if not sid:
-            html = f"""<!doctype html>
+        if not sid or not await repo.get_session(request.app.state.db, sid):
+            html_body = f"""<!doctype html>
             <html lang="en" data-bar="glow"><head><meta charset=utf-8>
             <meta name=viewport content="width=device-width,initial-scale=1">
             <meta name=theme-color content="#081014">
-            <title>{BRAND_NAME} · Studio</title>
+            <title>{html.escape(BRAND_NAME)} · Studio</title>
             <link rel=icon href="/static/favicon.svg" type="image/svg+xml">
             <link rel=stylesheet href="/static/app.css"></head><body>
             <div class="blocker"><div class="inner">
               <div class="icon">🚀</div>
-              <h1>{BRAND_NAME} Studio</h1>
+              <h1>{html.escape(BRAND_NAME)} Studio</h1>
               <p>Open this page from the bot — tap <b>🌐 Open Upload Studio</b> or send
-                 <code>/studio</code>. The link carries a signed session, one link per job.</p>
-              <p class="hint">Already have a link? Open it again — sessions last 7 days.</p>
+                 <code>/studio</code>. The link carries a signed session.</p>
+              <p class="hint">Already have a link? Send <code>/studio</code> again to get a fresh one.</p>
+              <p><a href="/">Back to ZC DriveUp</a></p>
             </div></div></body></html>"""
-            return HTMLResponse(html, status_code=200)
+            return HTMLResponse(html_body, status_code=200)
         return HTMLResponse((STATIC / "index.html").read_text(encoding="utf-8"))
 
     @app.exception_handler(404)

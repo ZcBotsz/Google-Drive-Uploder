@@ -22,13 +22,14 @@ Telegram ──▶ Bot (aiogram 3) ──▶ worker pool ──▶ Google Drive
 | Area | Highlights |
 | --- | --- |
 | **Chat flow** | Job card → folder → naming → sequence → start; live `<pre>` progress card; final summary with links |
-| **Studio (Mini App)** | Splash → files → destination tree → naming preview → drag-to-sort sequence → review → live progress (SSE) → done screen with confetti and CSV |
+| **Public website** | Branded ZC DriveUp home page at `/`, with Telegram entry points and links to the existing Studio, Drive connection, and admin routes |
+| **Studio (Mini App)** | `/studio`: splash → files → destination tree → naming preview → drag-to-sort sequence → review → live progress (SSE) → done screen with confetti and CSV; signed bot links land here |
 | **Naming** | 17 variables (`{seq:03d}`, `{date}`, `{size}`, `{caption}` …), find/replace with regex, case tools, emoji strip, 255-byte trimming, dedupe |
 | **Ordering** | Telegram order, natural name sort, size, date, or manual; renumber `seq_index` on every change |
 | **Uploads** | Resumable sessions, md5 verification, duplicate policy (rename/skip/overwrite), 750 GB/day guard, resume after a restart |
 | **Access** | OAuth (offline + consent + PKCE), encrypted refresh tokens, per-plan quotas, locks with TTL, force-sub |
 | **Admin** | 9 pages: dashboard, users, jobs/queue, locks, plans, broadcast, settings, audit, danger zone |
-| **Polish** | 4 progress styles, portable animated ASCII progress track, reduced-motion, ARIA live regions, i18n (en/hi), keyboard shortcuts, grouped small-caps Telegram menus, semantic coloured inline buttons with animated custom-emoji icons |
+| **Polish** | 4 progress styles, portable animated ASCII progress track, reduced-motion, ARIA live regions, English-only bot responses, keyboard shortcuts, grouped small-caps Telegram menus, semantic coloured inline buttons with animated custom-emoji icons |
 
 ---
 

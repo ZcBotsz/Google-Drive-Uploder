@@ -1,25 +1,33 @@
-"""`m:<command>` buttons — run the real handler, do not reimplement it.
+"""Inline navigation and command adapters.
 
-There is exactly one implementation of every command. A button press turns
-`m:storage` into the text "/storage" and calls the same handler a typed message
-would, so the two can never disagree about what a command does.
+Menus edit the current message so actions feel like a compact app rather than
+an expanding stack of command replies. The original typed commands remain
+available and continue to call the same handlers.
 """
 from __future__ import annotations
 
 import logging
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from ...db import repo
-from ..menus import main_menu_kb, quick_kb
+from ...strings import sc
+from ..menus import (ADMIN_MENU, account_menu_kb, admin_menu_kb, drive_menu_kb,
+                     main_menu_kb, more_menu_kb, uploads_menu_kb)
+from ..ui.buttons import plain, primary
 
 log = logging.getLogger("driveup.handlers.menu")
 router = Router(name="menu")
-
-MENU_HEADER = ("<b>📋 All commands</b>\n"
-               "Tap any button to open a command.")
+MAIN_TEXT = (
+    f"<b>🚀 {sc('ZC DRIVEUP')} · {sc('MAIN MENU')}</b>\n\n"
+    "Your Telegram-to-Drive workspace. Connect once, send files or links, "
+    "then choose the folder and upload options.\n\n"
+    "Pick a button below to continue."
+)
+MORE_TEXT = f"<b>{sc('DRIVEUP TOOLS')}</b>\nChoose a section. The menu stays in this message."
 
 
 async def is_admin_user(app, user_id: int, data: dict) -> bool:
@@ -32,33 +40,20 @@ async def is_admin_user(app, user_id: int, data: dict) -> bool:
 
 @router.message(Command("hello"))
 async def cmd_hello(msg: Message, **data):
-    """A small greeting that also opens the menu."""
     app = data["_app"]
     admin = await is_admin_user(app, msg.from_user.id, data)
-    name = (msg.from_user.first_name or "there").strip()
     await msg.answer(
-        f"👋 <b>Hello, {name}!</b>\n\n"
-        "I'm your Google Drive uploader.\n"
-        "📤 Send a file or 🔗 paste a direct link to upload it to Drive.\n\n"
-        "<i>Choose a command below.</i>", 
-        reply_markup=quick_kb(is_admin=admin))
-    if await app_has_error_log(app):
-        # logged once per session, not per message
-        log.debug("menu opened with recent errors in the log")
-
-
-async def app_has_error_log(app) -> bool:
-    try:
-        return bool(await repo.recent_errors(app.db, limit=1))
-    except Exception:                                    # noqa: BLE001
-        return False
+        f"👋 <b>Hello — {sc('WELCOME TO ZC DRIVEUP')}</b>\n\n"
+        "Send a Telegram file or direct link. I’ll guide you through the destination, "
+        "naming and upload — use the menu buttons for the rest.",
+        reply_markup=main_menu_kb(is_admin=admin))
 
 
 @router.message(Command("menu"))
 async def cmd_menu(msg: Message, **data):
     app = data["_app"]
     admin = await is_admin_user(app, msg.from_user.id, data)
-    await msg.answer(MENU_HEADER, reply_markup=main_menu_kb(is_admin=admin))
+    await msg.answer(MAIN_TEXT, reply_markup=main_menu_kb(is_admin=admin))
 
 
 @router.callback_query(F.data == "m:noop")
@@ -66,83 +61,125 @@ async def cb_noop(call: CallbackQuery, **data):
     await call.answer()
 
 
+async def _edit_menu(call: CallbackQuery, text: str, markup: InlineKeyboardMarkup):
+    try:
+        await call.message.edit_text(text, reply_markup=markup)
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e).lower():
+            log.debug("menu edit failed: %s", e)
+
+
 @router.callback_query(F.data == "m:menu")
-async def cb_menu(call: CallbackQuery, **data):
+@router.callback_query(F.data == "ui:home")
+async def cb_home(call: CallbackQuery, **data):
     app = data["_app"]
     admin = await is_admin_user(app, call.from_user.id, data)
     await call.answer()
-    try:
-        await call.message.edit_text(MENU_HEADER, reply_markup=main_menu_kb(is_admin=admin))
-    except Exception:                                    # noqa: BLE001 — unchanged text
-        await app.say(call.message.chat.id, MENU_HEADER,
-                      reply_markup=main_menu_kb(is_admin=admin))
+    await _edit_menu(call, MAIN_TEXT, main_menu_kb(is_admin=admin))
+
+
+@router.callback_query(F.data.startswith("ui:"))
+async def cb_section(call: CallbackQuery, **data):
+    app = data["_app"]
+    section = (call.data or "").split(":", 1)[1]
+    admin = await is_admin_user(app, call.from_user.id, data)
+    screens = {
+        "more": (MORE_TEXT, more_menu_kb(is_admin=admin)),
+        "drive": (f"<b>{sc('GOOGLE DRIVE')}</b>\nConnect your account, check space, browse folders or change the destination.", drive_menu_kb()),
+        "uploads": (f"<b>{sc('UPLOADS & TOOLS')}</b>\nManage your Studio, active jobs, names, ordering and history.", uploads_menu_kb(is_admin=admin)),
+        "account": (f"<b>{sc('ACCOUNT & STATS')}</b>\nReview your connected account, usage and Max membership.", account_menu_kb()),
+    }
+    if section == "admin":
+        if not admin:
+            return await call.answer("This section is for administrators.", show_alert=True)
+        screens["admin"] = (f"<b>{sc('ADMIN CONTROL CENTER')}</b>\nChoose an admin action. Sensitive actions remain owner-checked.", admin_menu_kb())
+    screen = screens.get(section)
+    if not screen:
+        return await call.answer()
+    await call.answer()
+    await _edit_menu(call, screen[0], screen[1])
+
+
+class _MenuMessageProxy:
+    """Make normal handler replies edit the tapped menu message instead."""
+    is_menu_proxy = True
+
+    def __init__(self, call: CallbackQuery):
+        self._call = call
+        self._message = call.message
+
+    def __getattr__(self, name):
+        return getattr(self._message, name)
+
+    async def answer(self, text=None, *args, **kwargs):
+        if text is None:
+            text = " "
+        markup = kwargs.pop("reply_markup", None)
+        if isinstance(markup, InlineKeyboardMarkup):
+            rows = [list(row) for row in markup.inline_keyboard]
+        else:
+            rows = []
+        # Preserve handler-specific buttons and keep navigation available.
+        if not any(any(getattr(b, "callback_data", "") == "ui:home" for b in row) for row in rows):
+            rows.append([primary("Back to Main Menu", icon="🌐", callback_data="ui:home")])
+        if rows:
+            markup = InlineKeyboardMarkup(inline_keyboard=rows)
+        allowed = {k: kwargs[k] for k in ("parse_mode", "entities", "link_preview_options") if k in kwargs}
+        try:
+            return await self._message.edit_text(str(text), reply_markup=markup, **allowed)
+        except TelegramBadRequest as e:
+            if "message is not modified" in str(e).lower():
+                return self._message
+            raise
 
 
 @router.callback_query(F.data.startswith("m:"))
 async def cb_command(call: CallbackQuery, **data):
-    """Turn the tap into the same message a typed command would produce."""
+    """Run the existing command handler, editing the menu message in place."""
     app = data["_app"]
     cmd = (call.data or "")[2:].strip()
     if not cmd:
         return await call.answer()
-
     admin_only = {"admin", "stats", "users", "userinfo", "locks", "lock", "unlock",
                   "addplan", "removeplan", "expiring", "addadmin", "removeadmin",
                   "broadcast", "pause_all", "resume_all", "maintenance", "audit",
-                  "system"}
+                  "system", "export"}
     if cmd in admin_only and not await is_admin_user(app, call.from_user.id, data):
-        return await call.answer("Sirf admin ke liye.", show_alert=True)
-
+        return await call.answer("This action is for administrators.", show_alert=True)
     await call.answer()
-    # A command that needs an argument opens its own prompt; the plain text is
-    # what the user would have typed, so the handler answers exactly as usual.
     prompts = {"lock": "/lock <user_id> <minutes> <reason>",
                "unlock": "/unlock <user_id>"}
     text = prompts.get(cmd, f"/{cmd}")
-
-    # Feed a synthetic message through the real handlers. `feed_update` would
-    # re-enter the middleware and re-count quota, so the handler is called
-    # directly with the same data the middleware already built for this update.
     from . import admin as admin_h
     from . import start as start_h
     from . import upload as upload_h
     from . import thumb as thumb_h
-
-    shadow = _shadow_message(call, text)
+    shadow = _MenuMessageProxy(call)
+    # Keep a text-shaped message so handlers can read the synthetic command,
+    # while answer() is intercepted to edit the original menu message.
+    shadow.text = text
+    shadow.caption = None
+    shadow.entities = None
+    shadow.caption_entities = None
+    shadow.from_user = call.from_user
     for module in (thumb_h, start_h, upload_h, admin_h):
         for observer in module.router.message.handlers:
             filt = _command_filter(observer)
             if filt and filt == cmd:
                 try:
                     return await observer.callback(shadow, **data)
-                except Exception as e:                   # noqa: BLE001
+                except Exception as e:  # noqa: BLE001
                     log.exception("menu command %s failed: %s", cmd, e)
-                    return await app.say(call.message.chat.id,
-                                         f"⚠️ <code>{cmd}</code> failed: {e}")
+                    try:
+                        return await shadow.answer(
+                            f"<b>Could not open {sc(cmd)}.</b> Please try again or use /{cmd}.")
+                    except Exception:
+                        return None
 
 
 def _command_filter(observer):
-    """The single command a message handler is bound to, or ''."""
     for f in getattr(observer, "filters", []) or []:
         commands = getattr(getattr(f, "callback", None), "commands", None)
         if commands:
-            first = str(list(commands)[0]).lower()
-            return first
+            return str(list(commands)[0]).lower()
     return ""
-
-
-def _shadow_message(call: CallbackQuery, text: str) -> Message:
-    """A Message that looks like the user typed `text` in this chat.
-
-    aiogram's models are frozen, so the fields are replaced through
-    `model_copy(update=...)` — assigning to them raises. Chat, user and message
-    id stay real; only the body is synthesised, and the caption fields are
-    cleared so a message never carries both text and caption.
-    """
-    return call.message.model_copy(update={
-        "text": text,
-        "caption": None,
-        "entities": None,
-        "caption_entities": None,
-        "from_user": call.from_user,
-    })

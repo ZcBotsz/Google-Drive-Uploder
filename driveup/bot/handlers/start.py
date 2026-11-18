@@ -6,7 +6,7 @@ import logging
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery
-from ..ui.buttons import auto as B
+from ..ui.buttons import auto as B, success
 from aiogram.types import InlineKeyboardMarkup as KM
 from aiogram.types import Message
 from aiogram.types import WebAppInfo
@@ -18,7 +18,7 @@ from ...core import naming as naming_mod
 from ...core.naming import NamingOptions
 from ...drive import auth as oauth
 from ...drive.endpoints import parse_folder_id
-from ...strings import esc, t
+from ...strings import esc, sc, t
 from ..keyboards import cb, connect_kb, force_sub_kb, naming_kb, sequence_kb
 from ..ui.stream import stream_reply
 
@@ -43,11 +43,29 @@ async def cmd_start(msg: Message, **data):
     app = app_of(data)
     lang = data["lang"]
     user = data["user"]
-    g = await repo.get_global(app.db)
-    welcome = g.get("welcome_text") or t("welcome", lang, brand=g.get("brand_name", BRAND_NAME))
+    from ...config import effective_max_file_mb
+    cap_mb = effective_max_file_mb(app.cfg)
+    welcome = (
+        f"🚀 <b>DriveUp · {sc(BRAND_NAME)} GOOGLE DRIVE UPLOADER</b>\n"
+        "<i>Fast, guided transfers from Telegram to your Drive.</i>\n\n"
+        "1. Connect your Google Drive.\n"
+        "2. Send a file or a direct link.\n"
+        "3. Choose a folder, review the name and order, then start.\n\n"
+        f"📦 <b>Current per-file ceiling:</b> {cap_mb} MB. "
+        "Google Drive storage and service limits still apply.\n\n"
+        "Choose an option below — no command typing required."
+    )
     missing = await app.access.force_sub_missing(user["user_id"])
+    payload = (msg.text or "").partition(" ")[2].strip().lower()
     if missing:
         kb = force_sub_kb(missing)          # must join before anything else
+    elif payload == "studio":
+        # Landing-page CTA deep-links back into Telegram, then gives the user
+        # a fresh signed link to the private Studio workspace.
+        kb = KM(inline_keyboard=[[
+            success("Open Upload Studio", icon="🌐",
+                    url=app.studio_url(user_id=user["user_id"]))
+        ]])
     else:
         # Every command is a button — nobody should have to remember /syntax.
         from ..menus import quick_kb

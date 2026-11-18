@@ -431,14 +431,21 @@ async def test_admin_pages_render(web):
     assert "DriveUp" in r.text and "Dashboard" in r.text
 
 
-async def test_index_without_session_explains_how_to_open(web):
+async def test_homepage_shows_the_zc_driveup_landing_site(web):
     r = await web["client"].get("/")
-    assert r.status_code == 200 and "/studio" in r.text
+    assert r.status_code == 200
+    assert "Move files to Drive." in r.text and "Keep your flow." in r.text
+    assert "/studio" in r.text and "/connect" in r.text
 
 
-async def test_index_with_session_serves_the_studio(web):
+async def test_studio_without_session_explains_how_to_open(web):
+    r = await web["client"].get("/studio")
+    assert r.status_code == 200 and "Open this page from the bot" in r.text
+
+
+async def test_studio_with_session_serves_the_upload_workspace(web):
     c = await login(web)
-    r = await c.get("/")
+    r = await c.get("/studio")
     assert r.status_code == 200 and "DriveUp Studio" in r.text and "splash" in r.text
 
 

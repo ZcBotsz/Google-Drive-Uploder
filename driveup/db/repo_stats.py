@@ -48,15 +48,23 @@ async def seed_plans(db: Database, cfg=None) -> None:
                            daily_gb=getattr(cfg, 'default_daily_gb', 10),
                            concurrent=1, max_files_job=200,
                            features=["web_studio", "custom_naming"], sort=1)
-    await upsert_plan(db, "pro", name="Pro", price_text="₹99 / month", duration_days=30,
+    # Keep legacy plan IDs for existing admin grant flows, while Max is the
+    # sole advertised paid plan. Legacy tiers are not shown in the user UI.
+    await upsert_plan(db, "pro", name="Pro (legacy)", price_text="Legacy", duration_days=30,
                            max_file_mb=cap, daily_gb=200, concurrent=2, max_files_job=1000,
                            features=["web_studio", "custom_naming", "bulk_jobs",
-                                     "shared_drives"] + big, sort=2)
-    await upsert_plan(db, "business", name="Business", price_text="₹499 / month",
+                                     "shared_drives"] + big, sort=9)
+    await upsert_plan(db, "business", name="Business (legacy)", price_text="Legacy",
                            duration_days=30, max_file_mb=cap, daily_gb=750, concurrent=4,
                            max_files_job=5000,
                            features=["web_studio", "custom_naming", "bulk_jobs",
-                                     "shared_drives", "presets"] + big, sort=3)
+                                     "shared_drives", "presets"] + big, sort=10)
+    await upsert_plan(db, "max", name="Max", price_text="₹499 / month",
+                           duration_days=30, max_file_mb=cap, daily_gb=750, concurrent=4,
+                           max_files_job=5000,
+                           features=["web_studio", "custom_naming", "bulk_jobs",
+                                     "shared_drives", "presets"] + big, sort=2)
+
 
 
 async def get_plan(db: Database, plan_id: str) -> Optional[dict]:

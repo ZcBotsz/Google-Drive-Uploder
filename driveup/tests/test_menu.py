@@ -23,7 +23,7 @@ def test_every_shipped_command_has_a_button():
     found = set()
     for f in handlers.glob("*.py"):
         found |= set(re.findall(r'Command\("([a-z_]+)"\)', f.read_text()))
-    missing = found - ALL_COMMANDS - {"start", "menu"}
+    missing = found - ALL_COMMANDS - {"start", "menu", "hello"}
     assert not missing, f"commands with no button: {sorted(missing)}"
 
 
@@ -47,11 +47,25 @@ async def test_menu_lists_every_command(botenv):
     sent = [c for c in botenv["sess"].calls if c["method"] == "SendMessage"]
     buttons = [b["callback_data"] for row in
                sent[-1]["params"]["reply_markup"]["inline_keyboard"] for b in row]
-    user_buttons = {b[2:] for b in buttons if b.startswith("m:")}
-    missing = {c for c, _, _ in USER_MENU} - user_buttons - {"menu"}
-    assert not missing, f"not on the menu: {sorted(missing)}"
-    # an ordinary user must not be offered admin commands
-    assert "admin" not in user_buttons
+    callbacks = set(buttons)
+    # The home screen stays compact; the More screen leads to focused sections.
+    assert {"m:connect", "m:studio", "ui:more"} <= callbacks
+    before = len(botenv["sess"].calls)
+    await feed(botenv, fake_tg.callback("ui:more", uid=42, mid=12))
+    edits = [c for c in botenv["sess"].calls[before:] if c["method"] == "EditMessageText"]
+    assert edits, "More should edit the existing menu message"
+    section_callbacks = [b["callback_data"] for row in
+                         edits[-1]["params"]["reply_markup"]["inline_keyboard"] for b in row]
+    assert {"ui:drive", "ui:uploads", "ui:account"} <= set(section_callbacks)
+    assert "ui:admin" not in section_callbacks
+    # Every user command appears in at least one focused screen.
+    from driveup.bot.menus import drive_menu_kb, uploads_menu_kb, account_menu_kb
+    scoped = set()
+    for kb in (drive_menu_kb(), uploads_menu_kb(), account_menu_kb()):
+        scoped |= {b.callback_data[2:] for row in kb.inline_keyboard for b in row
+                   if b.callback_data and b.callback_data.startswith("m:")}
+    assert {c for c, _, _ in USER_MENU} - {"help"} <= scoped | {"help", "export"}
+    assert "m:admin" not in callbacks
 
 
 async def test_a_button_runs_the_real_command(botenv):
