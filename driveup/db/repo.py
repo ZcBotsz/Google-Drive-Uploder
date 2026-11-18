@@ -19,12 +19,12 @@ async def upsert_user(db: Database, user_id: int, name: str = "", username: str 
     row = await db.one("SELECT * FROM users WHERE user_id=?", (user_id,))
     if row is None:
         await db.x("INSERT INTO users(user_id,name,username,first_seen,last_seen,lang) VALUES(?,?,?,?,?,?)",
-                   (user_id, name, username, now, now, lang or "hinglish"))
+                   (user_id, name, username, now, now, lang or "en"))
         await db.x("INSERT INTO daily_stats(day,new_users) VALUES(date('now','localtime'),1) "
                    "ON CONFLICT(day) DO UPDATE SET new_users=new_users+1")
     else:
         await db.x("UPDATE users SET name=?, username=?, last_seen=?, lang=? WHERE user_id=?",
-                   (name or row["name"], username or row["username"], now, lang or row["lang"], user_id))
+                   (name or row["name"], username or row["username"], now, "en", user_id))
     got = await db.one("SELECT * FROM users WHERE user_id=?", (user_id,))
     got["settings"] = loads(got.get("settings"), {})
     return got
@@ -50,7 +50,8 @@ async def set_setting(db: Database, user_id: int, key: str, value: Any) -> None:
 
 
 async def set_lang(db: Database, user_id: int, lang: str) -> None:
-    await db.x("UPDATE users SET lang=? WHERE user_id=?", (lang, user_id))
+    # Compatibility no-op for old language-setting callbacks/admin callers.
+    await db.x("UPDATE users SET lang='en' WHERE user_id=?", (user_id,))
 
 
 async def count_users(db: Database, since: float = 0) -> int:

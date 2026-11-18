@@ -171,12 +171,16 @@ async def test_sequence_show_and_set(botenv):
     assert "telegram_order" in said(botenv) or "one of" in said(botenv)
 
 
-async def test_settings_language_toggle(botenv):
+async def test_bot_is_english_only_for_existing_users(botenv):
+    await repo.set_lang(botenv["db"], USER, "hinglish")
     await feed(botenv, fake_tg.message("/settings", uid=USER))
-    assert "Language" in said(botenv) or "language" in said(botenv).lower()
-    await feed(botenv, fake_tg.callback("v1:set:lang", uid=USER))
+    assert "English" in said(botenv)
+    assert "language" not in said(botenv).lower() or "English" in said(botenv)
     u = await repo.get_user(botenv["db"], USER)
-    assert u["lang"] in ("en", "hinglish")
+    assert u["lang"] == "en"
+    await feed(botenv, fake_tg.callback("v1:set:lang", uid=USER))
+    assert "English" in said(botenv)
+    assert (await repo.get_user(botenv["db"], USER))["lang"] == "en"
 
 
 async def test_plan_and_mystats(botenv):

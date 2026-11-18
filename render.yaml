@@ -39,8 +39,8 @@ services:
         value: "1"                     # lifts the 20 MB ceiling
       - key: FILE_SERVER
         value: "1"                     # serves the files to us on 8080
-      - key: PORT
-        value: "8081"
+      # The image listens on its API port 8081 and file port 8080 by default.
+      # Do not define PORT here; Render reserves/injects that variable for web services.
 
   # ── 2. the bot ───────────────────────────────────────────────────────────
   - type: web
@@ -105,8 +105,7 @@ services:
 
       - key: HOST
         value: 0.0.0.0
-      - key: PORT
-        value: 8080
+      # Render injects PORT for the web service; the app reads it automatically.
       - key: DB_PATH
         value: /app/data/driveup.sqlite3
       - key: TEMP_DIR

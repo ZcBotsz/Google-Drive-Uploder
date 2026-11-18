@@ -1,131 +1,48 @@
-# Render par 10 GB storage + badi files — exactly kya karna hai
+# Render: enable Telegram’s local Bot API for large files
 
-Do alag sawaal hain, aur inka jawab alag hai. Pehle woh clear karte hain.
+The bot currently reports Telegram cloud and a 20 MB limit. That means the running Render service is not using the local API yet. API ID/hash alone do not change the transport. Update the Render service configuration and redeploy, then verify with `/system`.
 
-## 1. 10 GB disk ka asli matlab
+## What the limits mean
 
-`render.yaml` mein dono services par **10 GB disk** hai. Lekin ye "10 GB ki file"
-nahi hai — aur ye jaan lena zaroori hai:
+- Telegram cloud Bot API downloads are limited to 20 MB.
+- A self-hosted local Bot API can support files up to 2000 MB, subject to your plan limit, service resources, and configured `MAX_FILE_MB`.
+- The 10 GB Render disks are persistent storage for database/cache; they do not set the maximum file size. In `UPLOAD_MODE=auto`, larger files stream rather than being fully staged on disk.
 
-| Cheez | Kitni badi ho sakti hai |
-|---|---|
-| **Per-file limit (Telegram)** | **2000 MB**, sirf local Bot API ke saath |
-| Cloud Bot API (aaj) | **20 MB** — isse zyada kabhi nahi |
-| Disk par ek waqt mein kya hota hai | **sirf 32 MB se choti files** |
+## Blueprint setup
 
-`UPLOAD_MODE=auto` par **32 MB se badi har file disk par likhi hi nahi jaati** —
-Telegram se seedha Drive ki resumable session mein stream hoti hai. Isliye 10 GB
-disk file-size ki limit nahi hai; woh database, logs aur local API ke cache ke
-liye hai.
+This project’s `render.yaml` defines a private `driveup-tg-api` service and the `driveup` web/bot service. Keep both in the same Render region.
 
-**Asli limit jo aapko chahiye:** `MAX_FILE_MB` (default 2000) aur plan ka
-`max_file_mb`. 10 GB disk par aaram se 500 MB–2 GB ki files chalti hain, kyunki
-woh disk par aati hi nahi.
+1. In Render, open **New → Blueprint**, select the repository containing this project’s `render.yaml`, and apply it.
+2. Set `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` on the `driveup-tg-api` service using values from <https://my.telegram.org> → API development tools.
+3. Set `API_ID` and `API_HASH` on the `driveup` service to the same values.
+4. Keep local API options `TELEGRAM_LOCAL=1`, `FILE_SERVER=1`, and `PORT=8081` as defined in the blueprint.
+5. Ensure the bot service has `TELEGRAM_API_URL` and `TELEGRAM_FILES_URL` linked to the private API service using the blueprint’s `fromService` references. They must not point to `https://api.telegram.org`.
+6. Deploy both services and wait for them to become healthy. If switching an already-running bot from cloud to a local API, follow Telegram’s current local Bot API migration guidance about logging the bot out of the cloud API before starting it locally; do not publish your bot token in a URL, log, or chat.
 
-> ⚠️ 10 GB se badi **ek** file bhi upload karni hai to `UPLOAD_MODE=disk` mat
-> kijiyega — woh poori file disk par likhega. `auto` hi rakhein.
+The blueprint’s shared `hostport` value uses API port 8081; this project maps file downloads to the local file-server port 8080.
 
-## 2. 2000 MB file ke liye local Bot API — Render par
+## Manual / renamed service configuration
 
-Telegram ka cloud API 20 MB se aage kuch nahi deta. Uske liye ek self-hosted Bot
-API server chahiye. `render.yaml` mein woh pehle se likha hua hai:
+If the API service was created manually or renamed, open its Render **Connect** panel and use its private hostname. On the `driveup` service, set both variables to the private API endpoint with port 8081, for example:
 
-```
-driveup-tg-api   (private service, disk 10 GB, port 8081 API + 8080 files)
-driveup          (web service, disk 10 GB, port 8080)
+```text
+TELEGRAM_API_URL=http://PRIVATE-HOST:8081
+TELEGRAM_FILES_URL=http://PRIVATE-HOST:8081
 ```
 
-Dono ek hi **region** mein hone chahiye — warna private network kaam nahi karega.
-Blueprint mein dono `singapore` par hain.
+The application routes file-server requests to port 8080. Ensure both services are in the same region, the API service is running, and `FILE_SERVER=1` is enabled. If using `render.yaml`, update both `fromService.name` values to the exact local API service name.
 
-### Step 1 — API_ID aur API_HASH
+## Verify after redeploy
 
-1. https://my.telegram.org → **API development tools**
-2. App banaiye (naam kuch bhi) → `api_id` aur `api_hash` milenge
-3. Dono values sambhal ke rakhein — ye **do jagah** jaati hain:
-   - `driveup-tg-api` service par: `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`
-   - `driveup` service par: `API_ID`, `API_HASH`
+Send `/system` to the bot as the owner. Success should show **Bot API: self-hosted (local)** and **per-file cap: 2000 MB** (wording may vary slightly by version). If it still says `Telegram cloud`, inspect the deployed `TELEGRAM_API_URL` and Render service references: the API ID/hash do not switch transport.
 
-### Step 2 — Blueprint deploy
+If `/system` reports local but a specific user is still limited to 20 MB, the user’s plan may retain a 20 MB `max_file_mb`. Open website Admin → Plans and raise that plan’s file limit (up to 2000 MB). Check `MAX_FILE_MB` as well. Do not advertise a 2 GB cap until `/system` confirms local mode and the effective plan/config allows it.
 
-1. Render → **New → Blueprint**
-2. Repo chuniye (jisme `render.yaml` ho)
-3. `sync: false` wale saare fields dashboard poochhega — wahan values daaliye
+## Troubleshooting
 
-**Jo cheezein aapko type karni hain:**
+- **Still cloud / 20 MB:** fix `TELEGRAM_API_URL`; ensure the API service is running and the correct private host and port are referenced.
+- **Bot cannot connect:** check same-region placement, Render private networking, API service logs, and whether `http://` is included in manually entered URLs.
+- **Download fails although API calls work:** confirm `FILE_SERVER=1`, port 8080 is available internally, and `TELEGRAM_FILES_URL` points at the API service. This project handles Render’s shared 8081/8080 port mapping.
+- **Plan-specific 20 MB error:** increase the affected plan’s `max_file_mb` in Admin → Plans; transport cap and plan cap are separate.
 
-| Variable | Kahan se |
-|---|---|
-| `BOT_TOKEN` | BotFather |
-| `OWNER_ID` | aapka Telegram user id |
-| `BOT_USERNAME` | bot ka username, `@` ke bina |
-| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Google Cloud Console |
-| `TOKEN_ENC_KEY` | `python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
-| `SESSION_SECRET` | koi bhi lamba random string |
-| `PUBLIC_URL` | `https://<aapka-service>.onrender.com` |
-| `GOOGLE_REDIRECT_URI` | `https://<aapka-service>.onrender.com/auth/google/callback` |
-| `API_ID` / `API_HASH` | Step 1 |
-| `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` | Step 1 (wahi values) |
-
-**Jo aapko type nahi karna:** `TELEGRAM_API_URL` aur `TELEGRAM_FILES_URL` —
-Render khud `fromService: hostport` se bhar deta hai.
-
-### Step 3 — ek baar `logOut`
-
-Local API par shift karne se pehle, **ek baar** ye URL browser mein kholiye
-(apna token daal kar):
-
-```
-https://api.telegram.org/bot<TOKEN>/logOut
-```
-
-Ye batata hai ki bot ab cloud se nahi, aapke server se chalega. Iske baad cloud
-~10 minute tak locked rehta hai — normal hai.
-
-### Step 4 — check kariye
-
-Bot ko `/start` bhejiye. Phir `/status` (admin) ya `/system` — wahan dikhega:
-
-```
-TELEGRAM_API_URL: http://driveup-tg-api-xxxx:8081
-uses local API : True
-per-file cap   : 2000 MB
-```
-
-Agar `uses local API: False` hai to `TELEGRAM_API_URL` set nahi hua.
-
-## 3. `hostport` ka ek trap — jo pehle se fix hai
-
-Render `fromService: hostport` **scheme ke bina** deta hai:
-
-```
-driveup-tg-api-abc123:8081        ← no http://
-```
-
-aur aiogram ka `from_base()` ise chup-chaap accept kar leta hai — phir **har API
-call fail** hoti hai. User ko woh "bot kaam nahi karta" jaisa dikhta hai.
-
-Code mein ab do jagah sambhala hua hai:
-
-- `Settings.api_base` scheme add karta hai → `http://driveup-tg-api-abc123:8081`
-- `_with_file_port()` file server ko 8080 par bhejta hai (API 8081 par hai),
-  kyunki `hostport` dono ke liye ek hi value deta hai
-
-Dono ke tests hain (`tests/test_local_api.py`).
-
-## 4. Render par jo cheezein alag hain (Railway se)
-
-| | Railway | Render |
-|---|---|---|
-| Private hostname | `service.railway.internal` (fixed) | `service-<hash>:port` (hash random) |
-| Isliye variable | haath se likhna | **`fromService` se reference** karna |
-| Port | aap chunte hain | `hostport` property |
-| Disk | per service | per service, `sizeGB` 1 se shuru |
-| Private service | n/a | `type: pserv`, koi public URL nahi |
-
-## 5. Agar sirf 20 MB tak kaafi hai
-
-Tab local API ki zaroorat nahi. `render.yaml` se `driveup-tg-api` service aur
-`TELEGRAM_API_URL` / `TELEGRAM_FILES_URL` / `API_ID` / `API_HASH` hata dijiye.
-Bot cloud API par chalega aur 20 MB tak ki files jayengi — aur `MAX_FILE_MB`
-khud 20 par clamp ho jayega, taaki koi aisa wada na ho jo poora na ho sake.
+Keep API credentials and bot token in Render secret environment variables. Never commit them to the repository or paste them into support chats.

@@ -152,7 +152,7 @@ class Access:
         role = await self.role(user_id)
         admin = role in ADMIN_BYPASS
         user = await repo.get_user(self.db, user_id) or {}
-        lang = user.get("lang", "hinglish")
+        lang = "en"
 
         if not admin:
             g = await self.glob()

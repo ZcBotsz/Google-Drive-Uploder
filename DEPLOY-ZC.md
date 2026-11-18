@@ -1,61 +1,86 @@
-# ZC Drive Uploader — Step-by-step deployment
+# ZC Drive Uploader — Render deployment guide
 
-This is the quick-start guide for the supplied project ZIP. The full reference guide is in `docs/DEPLOY.md`.
+This guide deploys the Telegram bot, Upload Studio, admin panel, local Telegram Bot API for large downloads, Google Drive OAuth, and optional log/dump channels. The root of the GitHub repository must contain `render.yaml`, `Dockerfile`, `main.py`, `bot.py`, `requirements.txt`, and the `driveup/` folder.
 
-## 1. Prepare the project
+## 1. Prepare the repository
+
 1. Download and extract `ZC-Drive-Uploader.zip`.
-2. Create a private GitHub repository and upload the **contents** of the extracted folder (so `Dockerfile`, `render.yaml`, `requirements.txt` and `driveup/` are at the repository root).
-3. Never upload `.env`, database files, OAuth credentials, or Telegram tokens.
+2. Create a GitHub repository and upload the **contents** of the extracted folder—not the parent folder. Confirm `render.yaml`, `Dockerfile`, `main.py`, `bot.py`, `requirements.txt`, and `driveup/` are at the repository root.
+3. Do not upload a `.env`, database files, Google credentials, or Telegram secrets.
 
-## 2. Create credentials
-1. In Telegram, speak to [@BotFather](https://t.me/BotFather), run `/newbot`, and save the token as `BOT_TOKEN`. Use the bot name **ZC Drive Uploader** if you like.
-2. Get your numeric Telegram ID from [@userinfobot](https://t.me/userinfobot); save as `OWNER_ID`.
-3. In [Google Cloud Console](https://console.cloud.google.com/), create a project, enable **Google Drive API**, configure the OAuth consent screen and add your Gmail as a test user.
-4. Create an OAuth **Web application** client. Add the deployed callback URL exactly as `https://YOUR-DOMAIN/auth/google/callback`. Save its client ID and secret.
-5. Generate keys locally (never share them):
-   ```bash
-   python3 -c "import secrets; print(secrets.token_urlsafe(48))"
-   python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-   ```
-   Use these for `SESSION_SECRET` and `TOKEN_ENC_KEY`, respectively.
+> If Render says `python: can't open file .../bot.py`, it is using the wrong root directory/repository or an older checkout. This package includes `bot.py` for compatibility; preferably deploy the included Docker Blueprint. For a manual Python service use `pip install -r requirements.txt` as the Build Command and `python main.py` as the Start Command.
 
-## 3. Deploy on Render (the included blueprint)
-1. In Render, choose **New → Blueprint**, connect the GitHub repository, and apply `render.yaml` (recommended; it uses the included Dockerfile). Ensure the repository root contains `render.yaml`, `Dockerfile`, `main.py`, `bot.py`, `requirements.txt`, and `driveup/`—not just a nested folder.
-2. Render creates the bot and local Telegram Bot API services. Complete every `sync: false` field in the Render dashboard. If you already created a manual Python web service, set **Root Directory** to the project root, **Build Command** to `pip install -r requirements.txt`, and **Start Command** to `python main.py`. A `bot.py` compatibility launcher is also included for older services whose start command is already `python bot.py`.
-3. Set the bot service secrets/config: `BOT_TOKEN`, `OWNER_ID`, `BOT_USERNAME`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `TOKEN_ENC_KEY`, `SESSION_SECRET`, `PUBLIC_URL` (your HTTPS service URL), and `GOOGLE_REDIRECT_URI` (`https://YOUR-DOMAIN/auth/google/callback`). Also set `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` on the API service, and matching `API_ID`/`API_HASH` on the bot service; get these from https://my.telegram.org.
-4. Set a unique, strong `ADMIN_PASSWORD` in the platform's secret settings (never in Git) to enable the admin panel's extra password gate. Admin access still requires your authorized Telegram account; the unlock expires after 10 minutes.
-5. Set `SUPPORT_CONTACT=@ZCQXx` and `BRAND_NAME=ZC Drive Uploader` if not already populated. Configure any remaining required variables from `.env.example`.
-6. Deploy and wait for `/health` to report healthy. The Render services must use the same region as specified in `render.yaml`.
-6. In Google OAuth settings, confirm the redirect URL exactly matches. For public use, review Google verification requirements; while in Testing, only listed test accounts can connect.
-7. Open the bot, run `/start`, then `/connect` and authorize Drive. Test a small file first, then a larger upload.
+## 2. Create the Telegram bot and local API credentials
 
-## 8. Alternative: Railway
-Use the included Dockerfile and `railway.json` from the repository root. Create a persistent volume mounted at `/app/data`; provide the same secrets and public HTTPS callback URL. If using Telegram's local Bot API for files over 20 MB, deploy/configure that service separately and set the API variables as described in `docs/DEPLOY.md`.
+1. Create the bot with [@BotFather](https://t.me/BotFather). Save its fresh token as `BOT_TOKEN` and its username (without `@`) as `BOT_USERNAME`.
+2. Get your numeric Telegram user ID from [@userinfobot](https://t.me/userinfobot); use it for `OWNER_ID`.
+3. For large files, create/reuse Telegram **API ID** and **API hash** at <https://my.telegram.org> → **API development tools**. Use these same values in both the local API service and bot service, as shown in Step 4.
+4. Make two private Telegram channels if you want upload logs and mirrored files. Add the bot as an administrator with permission to post. Keep their numeric IDs for Step 5.
 
-## 5. Log and dump channels
-1. Create two private Telegram channels, one for operations logs and one for the file dump.
-2. Add the bot as administrator to both with permission to post messages.
-3. Put their numeric IDs in Render environment variables `LOG_CHANNEL_ID` and `DUMP_CHANNEL_ID` on the **driveup bot service** (not the local Bot API service). These values are optional; blank disables that channel.
-4. After deployment, upload a small test file and confirm a record appears in the log channel and the original media/caption plus metadata appear in the dump channel.
+## 3. Create Google OAuth credentials
 
-The dump channel contains copies of user-submitted media. Disclose this in your privacy notice and restrict channel membership. Link-based uploads cannot be mirrored as actual media; a log record is posted instead.
+1. In [Google Cloud Console](https://console.cloud.google.com/), select/create a project and enable **Google Drive API**.
+2. Configure the OAuth consent screen. While it is in Testing, add the Google account you will test with as a test user.
+3. Create an OAuth client of type **Web application**.
+4. Add this as an **Authorized JavaScript origin** (domain only):
+   `https://YOUR-RENDER-SERVICE.onrender.com`
+5. Add this as an **Authorized redirect URI** (full path):
+   `https://YOUR-RENDER-SERVICE.onrender.com/auth/google/callback`
+6. Save the client ID and secret. The redirect URI must exactly match `GOOGLE_REDIRECT_URI` in Render, and both values must be from this same OAuth client.
 
-## 6. Admin and support
-Set `OWNER_ID` to your Telegram numeric ID. Open the admin route documented in `docs/DEPLOY.md` and sign in as the owner. Support defaults to **@ZCQXx**. Keep the encryption/session keys safe and back up the persistent `/app/data` volume securely.
+## 4. Deploy the Render Blueprint and enter environment values
 
-## 7. Render environment checklist
-Enter these through Render → `driveup` service → Environment. Never commit the values to Git.
+1. In Render choose **New → Blueprint**, connect the repository, and apply `render.yaml`. It creates two services: the private local Bot API service and the `driveup` web/bot service. They must be in the same region.
+2. Enter all `sync: false` values prompted by Render. In the **local Bot API service**, set:
+   - `TELEGRAM_API_ID` — from Step 2
+   - `TELEGRAM_API_HASH` — matching API hash
+   - Keep Blueprint values `TELEGRAM_LOCAL=1` and `FILE_SERVER=1`. Do not add `PORT` in Render’s environment settings; the API image uses its default ports, and Render manages the web service’s `PORT`.
+3. In the **driveup bot service**, set these secrets/values:
+   - `BOT_TOKEN`, `BOT_USERNAME`, `OWNER_ID`
+   - `API_ID` and `API_HASH` — same values as `TELEGRAM_API_ID` / `TELEGRAM_API_HASH`
+   - `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`
+   - `TOKEN_ENC_KEY` — generate with `python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`
+   - `SESSION_SECRET` — generate with `python3 -c "import secrets; print(secrets.token_urlsafe(48))"`
+   - `PUBLIC_URL=https://YOUR-RENDER-SERVICE.onrender.com`
+   - `GOOGLE_REDIRECT_URI=https://YOUR-RENDER-SERVICE.onrender.com/auth/google/callback`
+   - Set a strong `ADMIN_PASSWORD` in Render’s secret settings for the extra admin gate.
+4. The Blueprint supplies `TELEGRAM_API_URL` and `TELEGRAM_FILES_URL` using `fromService`; do not set them to `api.telegram.org`. It also supplies the app port, database paths, and upload settings.
+5. Add `SUPPORT_CONTACT=@ZCQXx` and `BRAND_NAME=ZC Drive Uploader` if they are not already configured.
+6. Wait for both services to deploy and for the bot service health check to pass.
 
-**Required secrets / deployment-specific values:** `BOT_TOKEN`, `OWNER_ID`, `BOT_USERNAME`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `TOKEN_ENC_KEY`, `SESSION_SECRET`, `PUBLIC_URL`, `GOOGLE_REDIRECT_URI`, `API_ID`, `API_HASH`, `ADMIN_PASSWORD`. For the local Bot API service: `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`.
+### If your local API service was renamed or created manually
 
-**Optional but requested:** `LOG_CHANNEL_ID`, `DUMP_CHANNEL_ID`.
+The `fromService.name` entries in `render.yaml` must exactly match the current service name. Alternatively, open the local API service’s **Connect** panel and copy its private hostname. On the **bot service**, set both `TELEGRAM_API_URL` and `TELEGRAM_FILES_URL` to that private hostname with port `8081`, e.g. `http://PRIVATE-HOST:8081`. The app maps the file-download connection to the image’s file server port `8080`. Do not use the public `api.telegram.org` URL.
 
-The blueprint supplies the remaining runtime settings, including `HOST`, `PORT`, `DB_PATH`, `TEMP_DIR`, `DOWNLOAD_DIR`, `TELEGRAM_API_URL`, `TELEGRAM_FILES_URL`, `TELEGRAM_WORK_DIR`, `DRIVE_SCOPE_MODE`, `UPLOAD_MODE`, `UPLOAD_CHUNK_MB`, `MAX_GLOBAL_UPLOADS`, `MAX_USER_UPLOADS`, and `PUBLIC_STUDIO`. Compare against `.env.example` for the full list. Use the same Telegram API ID/hash across the API service and bot service. Do not paste any old token found in the second supplied archive: regenerate it using BotFather first.\n\n**If you renamed the local Bot API service or deployed it manually:** the bot service must have `TELEGRAM_API_URL` and `TELEGRAM_FILES_URL` set to the API service's Render private hostname plus `:8081` (the application maps the files port to `8080`). Or update both `fromService.name` references in `render.yaml` to the exact current service name and apply the Blueprint. Then run `/system` as owner; success means `Bot API: self-hosted (local)` and `per-file cap: 2000 MB`. If it says `Telegram cloud`, `TELEGRAM_API_URL` is empty/wrong—the API ID/hash by themselves do not switch transports.
+## 5. Configure log and dump channels
 
-## 8. Troubleshooting
-- **OAuth redirect mismatch:** make the Google authorized redirect URI exactly `https://YOUR-DOMAIN/auth/google/callback` and match `GOOGLE_REDIRECT_URI`.
-- **Studio does not authenticate:** open it via `/studio` in Telegram; the Mini App relies on Telegram's signed initialization data.
-- **Uploads fail after redeploy:** confirm persistent storage is attached and keys have not changed.
-- **Files above 20 MB fail:** check that the local Bot API service is deployed and all API ID/hash/URL variables match; Telegram's cloud API has a 20 MB download limit.
+On the **driveup bot service**, set:
 
-Do not publish secrets in GitHub or send them in chat. Actual production connectivity cannot be tested until you add your own credentials and public domain. Review the included privacy/terms language for your own operation and jurisdiction before launch.
+- `LOG_CHANNEL_ID` to the private channel for events and upload success/failure records.
+- `DUMP_CHANNEL_ID` to the private channel where successfully uploaded Telegram messages should be copied.
+
+These can also be set from the website Admin → Settings. The bot needs post permission in each channel. A dump mirrors the original Telegram media/caption and adds a metadata record. Link-based uploads get an audit entry, but the bot cannot mirror remote files as Telegram media. Disclose the dump behavior to users and restrict channel membership.
+
+## 6. Verify large-file mode and limits
+
+1. Message the bot `/system` as the owner.
+2. Confirm it reports **Bot API: self-hosted (local)** and **per-file cap: 2000 MB**. If it reports Telegram cloud / 20 MB, `TELEGRAM_API_URL` is empty or wrong; API ID/hash alone do not enable local mode.
+3. If `/system` reports local but a user still sees a 20 MB plan limit, open website Admin → **Plans** and raise that plan’s max file size to `2000 MB`. Plans created before local API was enabled can retain the old 20 MB cap.
+4. Test a small file first, then a 44–50 MB file. Check both channels if logging/dump are enabled.
+
+## 7. Connect Google Drive and test the website
+
+1. Open the bot, run `/start`, then `/connect` and authorize Google Drive.
+2. If Google shows `redirect_uri_mismatch`, make sure the exact callback URI from Step 3 is under **Authorized redirect URIs** for the same client ID configured in Render, then redeploy.
+3. Use `/studio` to open the Upload Studio. The website is included in this project; it uses the bot session and per-user ownership checks. The bot is English-only in this build.
+4. Use `/admin` as the owner to open the admin website; the additional `ADMIN_PASSWORD` unlock is required when configured.
+
+## Troubleshooting
+
+- **Still 20 MB:** `/system` says cloud. Fix `TELEGRAM_API_URL` and `TELEGRAM_FILES_URL`, ensure the local API service is running, and check exact service reference/region.
+- **Local API URL set but downloads fail:** check `FILE_SERVER=1`, private-network access, and that both services share a region. This ZIP includes the hostport-to-file-port mapping for Render’s API 8081 / file 8080 setup.
+- **`redirect_uri_mismatch`:** check the exact callback and OAuth client ID/secret pair.
+- **`bot.py` missing:** update the repository with this ZIP’s root contents or set Render Root Directory to the folder containing `bot.py`, `main.py`, `requirements.txt`, and `driveup/`.
+- **Uploads fail after redeploy:** confirm the persistent disk is mounted and that `TOKEN_ENC_KEY` / `SESSION_SECRET` did not change.
+
+Never commit or post your bot token, API hash, Google client secret, or generated encryption/session keys. The supplied reference archive contained credential-looking values; use a freshly regenerated bot token and your own secrets only. Review privacy/terms text for your own operation before launch.

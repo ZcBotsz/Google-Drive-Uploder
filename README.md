@@ -321,7 +321,7 @@ Admin → Plans. Each plan carries `max_file_mb`, `daily_gb`, `files_per_job`,
 `days` and the feature flags `web_studio, bulk_jobs, shared_drives,
 large_files_2gb, custom_naming, presets`.
 
-**Strings** — `strings.py` holds the en/hi table. Missing keys fall back to en.
+**Strings** — the bot is English-only in this distribution. Existing Hinglish language preferences are normalized to English on the next interaction; the language switch is removed from Settings. English strings are in `strings.py`.
 
 **Lock screen** — `core/access.py::gate()` is the single choke point for
 maintenance → ban/lock → force-sub → plan → quota. Add a rule there and both the

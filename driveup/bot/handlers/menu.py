@@ -18,8 +18,8 @@ from ..menus import main_menu_kb, quick_kb
 log = logging.getLogger("driveup.handlers.menu")
 router = Router(name="menu")
 
-MENU_HEADER = ("<b>📋 Saare commands</b>\n"
-               "Kisi bhi button ko dabao — type karne ki zaroorat nahi.")
+MENU_HEADER = ("<b>📋 All commands</b>\n"
+               "Tap any button to open a command.")
 
 
 async def is_admin_user(app, user_id: int, data: dict) -> bool:
@@ -35,12 +35,12 @@ async def cmd_hello(msg: Message, **data):
     """A small greeting that also opens the menu."""
     app = data["_app"]
     admin = await is_admin_user(app, msg.from_user.id, data)
-    name = (msg.from_user.first_name or "dost").strip()
+    name = (msg.from_user.first_name or "there").strip()
     await msg.answer(
         f"👋 <b>Hello, {name}!</b>\n\n"
-        "Main aapka Google Drive uploader hoon.\n"
-        "📤 File bhejo, ya 🔗 seedha link bhejo — Drive me chali jayegi.\n\n"
-        "<i>Neeche se koi bhi command khol lo.</i>",
+        "I'm your Google Drive uploader.\n"
+        "📤 Send a file or 🔗 paste a direct link to upload it to Drive.\n\n"
+        "<i>Choose a command below.</i>", 
         reply_markup=quick_kb(is_admin=admin))
     if await app_has_error_log(app):
         # logged once per session, not per message

@@ -76,8 +76,9 @@ class BotApp:
         return f"{base}/start?t={token}{tail}"
 
     async def lang(self, user_id: int) -> str:
-        u = await repo.get_user(self.db, user_id) or {}
-        return u.get("lang", "hinglish")
+        # The deployed bot is intentionally English-only; existing DB language
+        # preferences from earlier versions must not leak Hinglish responses.
+        return "en"
 
     async def say(self, chat_id: int, text: str, **kw) -> Optional[int]:
         try:
@@ -144,12 +145,12 @@ class GateMiddleware:
         user = await repo.upsert_user(
             app.db, tg_user.id,
             name=(tg_user.full_name or "").strip(),
-            username=tg_user.username or "")
+            username=tg_user.username or "", lang="en")
         log.debug("gate user=%s role_pending", tg_user.id)
         role = await repo.role_of(app.db, tg_user.id, app.cfg.owner_id)
         user["role"] = role
         data["user"] = user
-        data["lang"] = user.get("lang", "hinglish")
+        data["lang"] = "en"
         data["role"] = role
 
         g = await repo.get_global(app.db)

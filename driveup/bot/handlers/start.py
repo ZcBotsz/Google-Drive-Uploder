@@ -301,7 +301,6 @@ async def cb_reconnect(call: CallbackQuery, **data):
 
 # ── settings ───────────────────────────────────────────────────────────────
 SETTINGS_KB_ROWS = [
-    ("lang", "🌐 Language"),
     ("conflict", "⚔️ Conflict policy"),
     ("share", "🔗 Shared link"),
     ("emoji", "✨ Animated emoji"),
@@ -393,10 +392,9 @@ async def cmd_settings(msg: Message, **data):
     uid = data["user"]["user_id"]
     s = await repo.get_user(app.db, uid)
     st = s.get("settings", {})
-    lang = data["lang"]
     text = (
         f"<b>⚙️ {esc(app_title())}</b>\n\n"
-        f"🌐 language: <b>{esc(s.get('lang'))}</b>\n"
+        "🌐 language: <b>English</b>\n"
         f"⚔️ conflicts: <b>{esc(st.get('conflict', 'rename'))}</b>\n"
         f"🔗 sharing: <b>{esc(st.get('share', 'restricted'))}</b>\n"
         f"✨ animated emoji: <b>{'on' if st.get('emoji') else 'off'}</b>\n"
@@ -418,9 +416,8 @@ async def cb_setting(call: CallbackQuery, **data):
     user = await repo.get_user(app.db, uid)
     st = user.get("settings", {})
     if key == "lang":
-        new = "en" if user.get("lang") != "en" else "hinglish"
-        await repo.set_lang(app.db, uid, new)
-        await call.answer(f"Language: {new}")
+        await repo.set_lang(app.db, uid, "en")
+        await call.answer("The bot language is English.")
     elif key == "conflict":
         order = ["rename", "skip", "overwrite"]
         cur = st.get("conflict", "rename")
