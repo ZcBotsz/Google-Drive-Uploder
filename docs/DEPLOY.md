@@ -27,7 +27,9 @@ Google OAuth client, and two generated keys.
 
 ---
 
-## 0.5 · ⚠️ Repo layout — read this before you deploy
+## 0.5 · ⚠️ Repo layout and Render `bot.py` startup error — read before deployment
+
+If Render reports `python: can't open file '/opt/render/project/src/bot.py'`, its Start Command points to a file that was missing in the earlier package or the service is using a different repository/root directory. The corrected package now includes a root `bot.py` compatibility launcher and a `Procfile`; the recommended entry point is still `python main.py` (or the included Dockerfile/Blueprint). Replace the old repository contents with this package, confirm `bot.py`, `main.py`, `requirements.txt` and `driveup/` are directly at the Render Root Directory, then redeploy. Do not point Render at the extracted parent folder if the app files are one level deeper.
 
 Railway and Render read config from the **root of your repository**. If your
 repo root contains a single `driveup/` folder and nothing else, the build fails

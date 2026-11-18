@@ -20,8 +20,8 @@ This is the quick-start guide for the supplied project ZIP. The full reference g
    Use these for `SESSION_SECRET` and `TOKEN_ENC_KEY`, respectively.
 
 ## 3. Deploy on Render (the included blueprint)
-1. In Render, choose **New → Blueprint**, connect the GitHub repository, and apply `render.yaml`.
-2. Render creates the bot and local Telegram Bot API services. Complete every `sync: false` field in the Render dashboard.
+1. In Render, choose **New → Blueprint**, connect the GitHub repository, and apply `render.yaml` (recommended; it uses the included Dockerfile). Ensure the repository root contains `render.yaml`, `Dockerfile`, `main.py`, `bot.py`, `requirements.txt`, and `driveup/`—not just a nested folder.
+2. Render creates the bot and local Telegram Bot API services. Complete every `sync: false` field in the Render dashboard. If you already created a manual Python web service, set **Root Directory** to the project root, **Build Command** to `pip install -r requirements.txt`, and **Start Command** to `python main.py`. A `bot.py` compatibility launcher is also included for older services whose start command is already `python bot.py`.
 3. Set the bot service secrets/config: `BOT_TOKEN`, `OWNER_ID`, `BOT_USERNAME`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `TOKEN_ENC_KEY`, `SESSION_SECRET`, `PUBLIC_URL` (your HTTPS service URL), and `GOOGLE_REDIRECT_URI` (`https://YOUR-DOMAIN/auth/google/callback`). Also set `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` on the API service, and matching `API_ID`/`API_HASH` on the bot service; get these from https://my.telegram.org.
 4. Set a unique, strong `ADMIN_PASSWORD` in the platform's secret settings (never in Git) to enable the admin panel's extra password gate. Admin access still requires your authorized Telegram account; the unlock expires after 10 minutes.
 5. Set `SUPPORT_CONTACT=@ZCQXx` and `BRAND_NAME=ZC Drive Uploader` if not already populated. Configure any remaining required variables from `.env.example`.
