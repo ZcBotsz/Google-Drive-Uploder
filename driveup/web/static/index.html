@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en" data-bar="glow">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=5">
+<meta name="theme-color" content="#081014">
+<meta name="color-scheme" content="dark light">
+<title>ZC Drive Uploader · DriveUp Studio</title>
+<meta name="description" content="Telegram → Google Drive uploader. Pick the folder, the names and the order.">
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app-base.js" defer></script>
+  <script src="/static/app-core.js" defer></script>
+  <script src="/static/app-views.js" defer></script>
+  <script src="/static/app-live.js" defer></script>
+<script src="https://telegram.org/js/telegram-web-app.js" defer></script>
+</head>
+<body>
+
+<!-- ── loading screen: real boot steps, minimum 600 ms ─────────────────── -->
+<div id="splash">
+  <div class="splash-inner">
+    <div class="splash-logo">ZC</div>
+    <div class="ring" aria-hidden="true"></div>
+    <div class="splash-title" id="brandName">ZC DRIVE</div>
+    <div class="splash-status" role="status" aria-live="polite">Connecting to Telegram…</div>
+    <div class="track"><div class="fill" style="width:0%"></div></div>
+    <noscript><p class="hint bad">This page needs JavaScript.</p></noscript>
+  </div>
+</div>
+
+<!-- ── app ─────────────────────────────────────────────────────────────── -->
+<div class="app">
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">🚀</span>
+      <span id="brandNameTop">ZC DRIVE</span>
+    </div>
+    <div class="spacer"></div>
+    <span class="who" id="who"></span>
+  </header>
+
+  <div class="wrap">
+    <div class="row" style="margin-bottom:6px">
+      <span class="step-label" id="stepLabel"></span>
+    </div>
+    <div class="steps" id="steps" role="progressbar" aria-valuemin="1" aria-valuemax="7"
+         aria-label="Wizard progress"></div>
+
+    <main id="view" class="screen"></main>
+    <div class="sr-only" role="status" aria-live="polite" id="announcer"></div>
+  </div>
+</div>
+
+<nav class="bottombar" id="bottom" aria-label="Wizard actions"></nav>
+<div id="toasts" aria-live="polite"></div>
+<div id="confetti" aria-hidden="true"></div>
+<div id="offline">⚡ You are offline — changes will retry</div>
+
+<script src="/static/app.js" defer></script>
+</body>
+</html>

@@ -1,66 +1,129 @@
-# Render Blueprint — Telegram Drive Uploader (Advanced)
-# Docs: https://render.com/docs/blueprint-spec
-# Deploy via: Render Dashboard → New → Blueprint → Connect this repo (auto-reads this file)
-# OR manually create Web Service with settings below.
+# DriveUp on Render — bot + a self-hosted Telegram Bot API, on the free private network.
+#
+# Why the second service exists
+# -----------------------------
+# Telegram's *cloud* Bot API refuses to hand over any file above 20 MB. That is
+# the ceiling users hit ("file upload nahi ho rahi"), and no setting on our side
+# can raise it. A self-hosted Bot API speaks the same protocol but has no such
+# limit, so the bot talks to it instead. See docs/RENDER-LOCAL-API.md.
+#
+# What the 10 GB disk is — and is not
+# -----------------------------------
+# The disk holds the SQLite database and the files Telegram has handed to the
+# server. It is NOT a per-file limit: with UPLOAD_MODE=auto any file over 32 MB
+# is streamed straight through and never written to disk. 10 GB is therefore
+# space for the database, logs and the local API's cache — not "maximum file
+# size". The real per-file cap is MAX_FILE_MB / the plan's own ceiling.
 
 services:
-  - type: web
-    name: telegram-drive-uploader
-    runtime: python
-    # Use Python 3.11 (tgcrypto wheels available)
+  # ── 1. the self-hosted Bot API ───────────────────────────────────────────
+  # Private service: no public URL, reachable only from the bot over Render's
+  # private network. rw = this one may also receive inbound requests.
+  - type: pserv
+    name: driveup-tg-api
+    runtime: image
+    image:
+      url: ghcr.io/gramiojs/telegram-bot-api:latest
+    plan: starter                      # a disk cannot attach to a free instance
+    region: singapore                  # MUST match the bot's region
+    disk:
+      name: tg-api-data
+      mountPath: /var/lib/telegram-bot-api
+      sizeGB: 10                       # space for the API's store, NOT a file cap
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.9
-      - key: PYTHONUNBUFFERED
-        value: 1
-      # --- REQUIRED: Set these in Render Dashboard (sync: false = secret, set manually) ---
+      - key: TELEGRAM_API_ID
+        sync: false                    # from my.telegram.org
+      - key: TELEGRAM_API_HASH
+        sync: false
+      - key: TELEGRAM_LOCAL
+        value: "1"                     # lifts the 20 MB ceiling
+      - key: FILE_SERVER
+        value: "1"                     # serves the files to us on 8080
+      - key: PORT
+        value: "8081"
+
+  # ── 2. the bot ───────────────────────────────────────────────────────────
+  - type: web
+    name: driveup
+    runtime: docker
+    plan: starter                      # free tier sleeps and kills uploads mid-flight
+    region: singapore                  # MUST match the API service
+    dockerfilePath: ./Dockerfile
+    # Repo layout: these files sit at the repository ROOT.
+    healthCheckPath: /health
+    autoDeploy: true
+    disk:
+      name: driveup-data
+      mountPath: /app/data
+      sizeGB: 10                       # database + small-file buffer, see the note above
+    envVars:
       - key: BOT_TOKEN
-        sync: false
-      - key: API_ID
-        sync: false
-      - key: API_HASH
         sync: false
       - key: OWNER_ID
         sync: false
-      - key: ADMIN_IDS
+      - key: BOT_USERNAME
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: LOG_CHANNEL_ID
+        sync: false
+      - key: DUMP_CHANNEL_ID
         sync: false
       - key: GOOGLE_CLIENT_ID
         sync: false
       - key: GOOGLE_CLIENT_SECRET
         sync: false
-      - key: WEB_BASE_URL
-        sync: false  # Set to https://<your-service>.onrender.com after first deploy
-      - key: WEB_SECRET
-        generateValue: true
-      # --- Optional ---
-      - key: USE_SERVICE_ACCOUNTS
-        value: "False"
-      - key: AUTO_SHARE
-        value: "True"
-      - key: MAX_CONCURRENT_UPLOADS
-        value: "2"
-      - key: KEEP_ALIVE
-        value: "True"
-      - key: LOG_LEVEL
-        value: "INFO"
-    buildCommand: pip install -r requirements.txt
-    startCommand: python bot.py
-    healthCheckPath: /health
-    # Persistent Disk (optional but RECOMMENDED for tokens/DB survival)
-    # Uncomment below and set DATA_DIR=/opt/render/project/src/persistent in env vars
-    # disk:
-    #   name: bot-data
-    #   mountPath: /opt/render/project/src/persistent
-    #   sizeGB: 1
-    # NOTE: Free tier allows 1 disk. Without disk, tokens/DB reset on every restart/deploy.
-    # With disk, set DATA_DIR env var to /opt/render/project/src/persistent
+      - key: TOKEN_ENC_KEY
+        sync: false
+      - key: SESSION_SECRET
+        sync: false
+      - key: PUBLIC_URL
+        sync: false
+      - key: GOOGLE_REDIRECT_URI
+        sync: false
 
-# Optional: Postgres for persistent DB (instead of SQLite on disk)
-# Uncomment if you want Postgres:
-# databases:
-#   - name: bot-db
-#     databaseName: botdb
-#     user: botuser
-#     plan: free
-# Then set DATABASE_URL in service env vars (auto-injected as DATABASE_URL)
-# NOTE: Current code uses SQLite on disk. Postgres support requires code change - disk is simpler.
+      # ── the local Bot API ──
+      # Render injects the private hostname + port; nobody types these. The
+      # value looks like driveup-tg-api-abc123:8081 — Render appends a hash,
+      # so it must be referenced, never hard-coded.
+      - key: API_ID
+        sync: false                    # same value as TELEGRAM_API_ID above
+      - key: API_HASH
+        sync: false                    # same value as TELEGRAM_API_HASH above
+      - key: TELEGRAM_API_URL
+        fromService:
+          type: pserv
+          name: driveup-tg-api
+          property: hostport
+      - key: TELEGRAM_FILES_URL
+        fromService:
+          type: pserv
+          name: driveup-tg-api
+          property: hostport
+      - key: TELEGRAM_WORK_DIR
+        value: /var/lib/telegram-bot-api
+
+      - key: HOST
+        value: 0.0.0.0
+      - key: PORT
+        value: 8080
+      - key: DB_PATH
+        value: /app/data/driveup.sqlite3
+      - key: TEMP_DIR
+        value: /app/data/tmp
+      - key: DOWNLOAD_DIR
+        value: /app/data/downloads
+      - key: DRIVE_SCOPE_MODE
+        value: file
+      - key: UPLOAD_MODE
+        value: auto                     # >32 MB streams, never touches the disk
+      - key: UPLOAD_CHUNK_MB
+        value: "8"
+      - key: MAX_GLOBAL_UPLOADS
+        value: "4"
+      - key: MAX_USER_UPLOADS
+        value: "2"
+      - key: PUBLIC_STUDIO
+        value: "true"
+      - key: PYTHONUNBUFFERED
+        value: "1"

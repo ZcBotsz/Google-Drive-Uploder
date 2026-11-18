@@ -1,16 +1,38 @@
-version: "3.8"
+# DriveUp — self-hosted stack.
+#   1) cp .env.example .env   and fill it in
+#   2) docker compose up -d --build
+#   3) put https in front (Caddy / Cloudflare Tunnel / nginx) and point
+#      PUBLIC_URL + the Google redirect URI at it.
 services:
-  bot:
+  driveup:
     build: .
-    container_name: telegram-drive-uploader
+    image: driveup:latest
+    container_name: driveup
     restart: unless-stopped
     env_file:
       - .env
-    volumes:
-      - ./tokens:/app/tokens
-      - ./accounts:/app/accounts
-      - ./downloads:/app/downloads
-      - ./bot.db:/app/bot.db
-      - ./client_secrets.json:/app/client_secrets.json
+    environment:
+      # These three must point at the mounted volume, not the image layer.
+      DB_PATH: /app/data/driveup.sqlite3
+      TEMP_DIR: /app/data/tmp
+      DOWNLOAD_DIR: /app/data/downloads
+      HOST: 0.0.0.0
+      PORT: "8080"
     ports:
       - "8080:8080"
+    volumes:
+      - driveup-data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 25s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  driveup-data:
