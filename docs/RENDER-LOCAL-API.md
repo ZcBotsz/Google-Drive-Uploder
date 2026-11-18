@@ -19,7 +19,7 @@ This project’s `render.yaml` defines a private `driveup-tg-api` service and th
 5. Ensure the bot service has `TELEGRAM_API_URL` and `TELEGRAM_FILES_URL` linked to the private API service using the blueprint’s `fromService` references. They must not point to `https://api.telegram.org`.
 6. Deploy both services and wait for them to become healthy. If switching an already-running bot from cloud to a local API, follow Telegram’s current local Bot API migration guidance about logging the bot out of the cloud API before starting it locally; do not publish your bot token in a URL, log, or chat.
 
-The blueprint’s shared `hostport` value uses API port 8081; this project maps file downloads to the local file-server port 8080.
+The blueprint’s shared `hostport` value uses API port 8081; this project maps file downloads to the local file-server port 8080. For manual environment settings on the bot Web Service, use the **matching private API service** and set `TELEGRAM_API_URL=http://PRIVATE-HOST:8081` and `TELEGRAM_FILES_URL=http://PRIVATE-HOST:8080`. Never point `TELEGRAM_API_URL` at 8080: that is nginx/file-server, not the Bot API. The file-download code strips the API server's work-directory prefix before requesting the file-server path.
 
 ## Manual / renamed service configuration
 

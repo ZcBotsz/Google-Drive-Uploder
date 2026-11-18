@@ -219,11 +219,16 @@ def file_server_url(bot, local_path: str, work_dir: str) -> str:
     # does not work".
     base = _with_file_port(base, getattr(bot, "api_port", ""),
                            getattr(bot, "files_port", ""))
-    rel = local_path
-    prefix = (work_dir or "").rstrip("/")
-    if prefix and rel.startswith(prefix):
-        rel = rel[len(prefix):]
-    return f"{base}/{rel.lstrip('/')}"
+    # Callers may already have removed the leading slash from Telegram's
+    # absolute local-API path. Normalize both sides before stripping the work
+    # directory; otherwise the server is asked for
+    # /var/lib/telegram-bot-api/<bot>/documents/... under an nginx root that is
+    # already /var/lib/telegram-bot-api, producing a 404.
+    rel = (local_path or "").lstrip("/")
+    prefix = (work_dir or "").strip("/")
+    if prefix and (rel == prefix or rel.startswith(prefix + "/")):
+        rel = rel[len(prefix):].lstrip("/")
+    return f"{base}/{rel}"
 
 
 def remote_path_for(bot, file_path: str, work_dir: str) -> str:
