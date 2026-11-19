@@ -720,3 +720,19 @@ def test_public_url_with_trailing_slash_is_trimmed(monkeypatch):
         monkeypatch.setenv(k, v)
     # no double slash in the generated callback
     assert Settings().redirect_uri == "https://a.example.com/auth/google/callback"
+
+
+async def test_dashboard_stats_are_session_scoped(web):
+    client = await login(web, 55)
+    own = await make_job(web, 55, files=(("mine.bin", b"1234"),))
+    other = await make_job(web, 77, files=(("other.bin", b"123456789"),))
+    own_item = (await repo.items_of(web["db"], own))[0]
+    other_item = (await repo.items_of(web["db"], other))[0]
+    await repo.set_item(web["db"], own_item["id"], state="done")
+    await repo.set_item(web["db"], other_item["id"], state="done")
+    assert (await repo.get_item(web["db"], own_item["id"]))["finished_at"] > 0
+    response = await client.get("/api/me")
+    assert response.status_code == 200
+    assert response.json()["upload_stats"]["files"] == 1
+    assert response.json()["upload_stats"]["bytes"] == 4
+    assert "other.bin" not in response.text

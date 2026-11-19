@@ -11,9 +11,9 @@
   <link rel="stylesheet" href="/static/app.css">
   <link rel="stylesheet" href="/static/history.css">
   <link rel="stylesheet" href="/static/batch-routes.css">
-  <link rel="stylesheet" href="/static/studio-dashboard.css">
+  <link rel="stylesheet" href="/static/studio-dashboard.css?v=20">
   <script src="/static/app-base.js" defer></script>
-  <script src="/static/app-core.js" defer></script>
+  <script src="/static/app-core.js?v=20" defer></script>
   <script src="/static/app-views.js" defer></script>
   <script src="/static/app-live.js" defer></script>
   <script src="/static/history.js" defer></script>
@@ -41,6 +41,7 @@
       <span id="brandNameTop">ZC DRIVE</span>
     </a>
     <div class="spacer"></div>
+    <a class="studio-nav-link" href="/studio" aria-label="Go to your Studio dashboard">Dashboard</a>
     <button class="btn ghost studio-history-trigger" id="historyBtn" type="button" aria-haspopup="dialog">Past uploads</button>
     <span class="who" id="who"></span>
   </header>
@@ -62,6 +63,6 @@
 <div id="confetti" aria-hidden="true"></div>
 <div id="offline">⚡ You are offline — changes will retry</div>
 
-<script src="/static/app.js" defer></script>
+<script src="/static/app.js?v=20" defer></script>
 </body>
 </html>

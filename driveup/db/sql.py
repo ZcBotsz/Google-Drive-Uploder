@@ -88,6 +88,12 @@ CREATE INDEX IF NOT EXISTS ix_items_state ON job_items(state);
 
 -- One configured Telegram collection channel holds at most one open draft batch.
 -- Closing a batch seals it; the next channel post starts a fresh job.
+CREATE TABLE IF NOT EXISTS channel_bindings (
+    user_id INTEGER PRIMARY KEY,
+    channel_id TEXT NOT NULL UNIQUE,
+    created_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS channel_batches (
     channel_id TEXT PRIMARY KEY,
     owner_id INTEGER NOT NULL,
@@ -97,6 +103,15 @@ CREATE TABLE IF NOT EXISTS channel_batches (
     updated_at REAL NOT NULL,
     FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS channel_verification_failures (
+    channel_id TEXT NOT NULL,
+    message_id INTEGER NOT NULL,
+    owner_id INTEGER NOT NULL,
+    created_at REAL NOT NULL,
+    PRIMARY KEY(channel_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS ix_channel_verification_owner ON channel_verification_failures(owner_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS channel_rejections (
     channel_id TEXT NOT NULL,

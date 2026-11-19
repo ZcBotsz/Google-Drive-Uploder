@@ -164,6 +164,7 @@ def settings_menu_kb(settings: dict | None = None) -> KM:
                  icon="🔢", callback_data=cb("menu", "sequence"))],
         [primary("Default folder › Change", icon="📁", callback_data=cb("menu", "setfolder"))],
         [primary("Preferences & toggles", icon="⚙️", callback_data=cb("menu", "settings"))],
+        [primary("Channel automation", icon="📥", callback_data="v1:automation")],
         _nav("⌂ Home"),
     ]
     return KM(inline_keyboard=rows)

@@ -59,6 +59,8 @@ class BotApp:
         self.albums: Dict[tuple, list] = {}
         self.album_tasks: Dict[tuple, asyncio.Task] = {}
         self.channel_collect_lock = asyncio.Lock()
+        self.channel_setup_pending: set[int] = set()
+        self.channel_verification_alerts: dict[str, float] = {}
         self.started_at = 0.0
 
     def studio_url(self, job_id: str = "", user_id: int = 0, *, admin: bool = False) -> str:
@@ -208,7 +210,7 @@ class GateMiddleware:
             return ""
         action = parts[1]
         arg = parts[-1] if action in self.MULTI_PART else parts[2]
-        if action in ("subok", "noop", "ntplcustom", "openstudio", "admin", "help", "ui", "menu"): 
+        if action in ("subok", "noop", "ntplcustom", "openstudio", "admin", "help", "ui", "menu", "automation", "autoset", "autounlink", "autostatus", "autofinish", "autoempty"): 
             return ""
         # ntpl / seqmode / folder / … carry a job id in position 2 → fall through
         # to the ownership check below so it always runs.

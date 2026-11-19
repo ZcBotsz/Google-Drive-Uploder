@@ -24,8 +24,9 @@ def test_two_consecutive_frames_differ():
     c = progress_card(frame=5, **kw)
     assert a != b, "frame 0 and 1 are identical — nothing animates"
     assert a != c
-    assert sc("telegram → server") in a
-    assert sc("server → drive") in a
+    assert "Telegram to server" in a
+    assert "Server to Google Drive" in a
+    assert all(label in a for label in ("Left", "ETA", "Retries", "Overall"))
     assert "█" not in a and "╭" not in a and "░" not in a
 
 

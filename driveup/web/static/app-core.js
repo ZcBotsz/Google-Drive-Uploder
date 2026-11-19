@@ -53,7 +53,15 @@ async function boot() {
     if (topBrand) topBrand.textContent = brand.toUpperCase();
     document.title = `${brand} · DriveUp Studio`;
     if (S.me.progress_style) document.documentElement.dataset.bar = S.me.progress_style;
-    await loadTree(S.folder.id);
+    // A disconnected account can still use its dashboard. Do not turn a
+    // failed folder lookup into a full-screen blocker during Studio startup.
+    if (!S.dashboard && S.me.drive_connected) await loadTree(S.folder.id);
+    if (jobId && !S.me.job) {
+      S.jobId = '';
+      S.dashboard = true;
+      history.replaceState(null, '', '/studio');
+      toast('That transfer is unavailable in this account.', 'err');
+    }
     bump();
     render();
     const wait = Math.max(0, 600 - (performance.now() - t0));
@@ -369,12 +377,15 @@ function viewFiles(view) {
   fileInput.className = 'sr-only';
   fileInput.setAttribute('aria-label', 'Choose files to upload');
   const pick = el('button', 'btn primary', 'Choose files');
+  pick.id = 'browserPick';
   pick.type = 'button';
   pick.onclick = () => fileInput.click();
   const intakeStatus = el('p', 'hint', 'Selected files stay private to your signed-in workspace and are sent to your connected Drive. Large selections are transferred in small batches.');
+  intakeStatus.id = 'browserIntakeStatus';
   intakeStatus.setAttribute('role', 'status');
   const progressBar = el('div', 'browser-progress');
   progressBar.hidden = true;
+  progressBar.id = 'browserIntakeProgress';
   progressBar.setAttribute('role', 'progressbar');
   progressBar.setAttribute('aria-label', 'File selection transfer to Studio');
   progressBar.setAttribute('aria-valuemin', '0'); progressBar.setAttribute('aria-valuemax', '100');
@@ -582,6 +593,13 @@ function viewFolder(view) {
   };
 
   renderTree();
+  // Dashboard-first sessions load the Drive tree lazily. If the user reaches
+  // this step before the background lookup finishes, refresh the visible tree.
+  if (!Array.isArray(S.tree.root) && S.me?.drive_connected) {
+    loadTree('root').then(() => {
+      if (S.step === 'folder' && $('#tree')) renderTree();
+    });
+  }
 
   $('#dsearch').oninput = debounce(async (ev) => {
     const q = ev.target.value.trim();

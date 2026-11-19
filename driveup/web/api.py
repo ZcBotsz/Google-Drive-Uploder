@@ -122,6 +122,7 @@ async def api_me(request: Request, user=Depends(session_user)):
                     "max_file_mb": plan.get("max_file_mb"),
                     "daily_gb": plan.get("daily_gb")},
               usage_today=await repo.quota_used(st.db, user["user_id"]),
+              upload_stats=await repo.user_stats(st.db, user["user_id"]),
               job=job, blocked=blocked)
 
 
