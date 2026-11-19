@@ -21,13 +21,16 @@ import csv
 import io
 import json
 import logging
+import os
 import secrets
+import uuid
 import time
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Body, Depends, Query, Request, Response
+from fastapi import APIRouter, Body, Depends, File, Form, Query, Request, Response, UploadFile
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                RedirectResponse, StreamingResponse)
+from pathlib import Path
 
 from ..config import BRAND_NAME, settings as default_settings
 from ..core import naming as naming_mod
@@ -121,6 +124,7 @@ async def job_payload(st, job: dict) -> dict:
     items = await repo.items_of(st.db, job["id"])
     return {
         "id": job["id"], "status": job["status"],
+        "source": job.get("source") or {},
         "destination": job.get("destination") or {},
         "naming": job.get("naming") or {},
         "sequence_mode": job.get("sequence_mode"),
@@ -151,6 +155,122 @@ async def owned_job(request: Request, job_id: str, user: dict) -> Optional[dict]
 
 
 # ── jobs ────────────────────────────────────────────────────────────────────
+@router.get("/api/jobs")
+async def api_jobs(request: Request, limit: int = Query(25, ge=1, le=100),
+                   user=Depends(session_user)):
+    """Private upload history. The user ID is always taken from the verified session."""
+    st = state_of(request)
+    rows = await repo.jobs_for_user(st.db, user["user_id"], limit=limit)
+    return ok(jobs=[{
+        "id": row["id"], "status": row["status"], "created_at": row.get("created_at"),
+        "destination": row.get("destination") or {}, "totals": row.get("totals") or {},
+    } for row in rows])
+
+
+@router.post("/api/uploads")
+async def api_browser_upload(request: Request, files: List[UploadFile] = File(...),
+                             job_id: str = Form(""), user=Depends(session_user)):
+    """Stage browser-selected files for the existing Drive worker pipeline.
+
+    Job ownership, account connection, plan/file limits, and daily byte ceilings
+    are checked server-side. Browser-supplied user IDs are never accepted.
+    """
+    st = state_of(request)
+    if not files or len(files) > 100:
+        return fail("file_count", "Choose between 1 and 100 files at a time.", 422)
+    target_job = None
+    if job_id:
+        target_job = await owned_job(request, job_id, user)
+        if not target_job:
+            return fail("not_found", "job not found", 404)
+        if target_job["status"] != "draft":
+            return fail("locked", "Files can only be added to a draft upload.", 409)
+    decision = await st.access.gate(user["user_id"], scope="upload", need_connect=True,
+                                    feature="web_studio")
+    if not decision:
+        return fail(decision.reason, decision.screen, 403)
+    plan = decision.extra.get("plan") or await repo.effective_plan(st.db, user["user_id"])
+    existing = await repo.items_of(st.db, job_id) if target_job else []
+    max_files = int(plan.get("max_files_job") or 5000)
+    if len(existing) + len(files) > max_files:
+        return fail("plan", f"Your plan allows {max_files} files per job.", 403)
+    max_bytes = int(plan.get("max_file_mb") or getattr(st.cfg, "default_max_file_mb", 2000)) * 1024 ** 2
+    daily_cap = int(float(plan.get("daily_gb") or 0) * 1024 ** 3)
+    used = await repo.quota_used(st.db, user["user_id"])
+    batch_cap = max(0, daily_cap - int(used.get("bytes", 0))) if daily_cap else 0
+    root = Path(st.cfg.download_dir) / "studio"
+    root.mkdir(parents=True, exist_ok=True)
+    staged: list[dict] = []
+    temporary: list[Path] = []
+    total_bytes = 0
+    try:
+        for upload in files:
+            original = os.path.basename((upload.filename or "file").replace("\\", "/")).strip() or "file"
+            original = original[:240]
+            token = uuid.uuid4().hex
+            final_path = root / f"{token}.upload"
+            temp_path = root / f"{token}.part"
+            temporary.append(temp_path)
+            size = 0
+            with temp_path.open("wb") as out:
+                while True:
+                    chunk = await upload.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    total_bytes += len(chunk)
+                    if size > max_bytes:
+                        raise ValueError(f"{original} exceeds the {max_bytes // (1024 ** 2)} MB per-file limit.")
+                    if daily_cap and total_bytes > batch_cap:
+                        raise ValueError("This batch exceeds the remaining daily upload allowance.")
+                    out.write(chunk)
+            if size == 0:
+                temp_path.unlink(missing_ok=True)
+                continue
+            os.replace(temp_path, final_path)
+            staged.append({"path": final_path, "name": original, "size": size,
+                           "mime": upload.content_type or "application/octet-stream", "token": token})
+        if not staged:
+            raise ValueError("The selected files are empty.")
+        if target_job:
+            jid = job_id
+        else:
+            jid = await repo.create_job(
+                st.db, user["user_id"], destination={"folder_id": "root", "path": "My Drive"},
+                naming={"template": "{original}.{ext}"}, sequence_mode="manual",
+                source={"kind": "web_studio"})
+        for entry in staged:
+            item_id = await repo.add_item(
+                st.db, jid, file_id=f"web:{entry['token']}",
+                file_unique_id=f"web:{entry['token']}", msg_id=0,
+                size=entry["size"], mime=entry["mime"], name=entry["name"],
+                chat_id=user["user_id"])
+            item = await repo.get_item(st.db, item_id)
+            tg = item.get("tg") or {}
+            tg["source_path"] = str(entry["path"])
+            await repo.set_item(st.db, item_id, tg=tg)
+        await repo.recompute_totals(st.db, jid)
+        fresh = await repo.get_job(st.db, jid)
+        await repo.audit(st.db, user["user_id"], "studio.browser_upload", jid,
+                         {"files": len(staged), "bytes": total_bytes})
+        return ok(job=await job_payload(st, fresh))
+    except ValueError as e:
+        for entry in staged:
+            entry["path"].unlink(missing_ok=True)
+        for path in temporary:
+            path.unlink(missing_ok=True)
+        return fail("upload_limit", str(e), 413)
+    except Exception:
+        for entry in staged:
+            entry["path"].unlink(missing_ok=True)
+        for path in temporary:
+            path.unlink(missing_ok=True)
+        raise
+    finally:
+        for upload in files:
+            await upload.close()
+
+
 @router.get("/api/jobs/{job_id}")
 async def api_job(request: Request, job_id: str, user=Depends(session_user)):
     st = state_of(request)
@@ -250,8 +370,15 @@ async def api_delete_item(request: Request, job_id: str, item_id: str,
     if not job:
         return fail("not_found", "job not found", 404)
     items = await repo.items_of(st.db, job_id)
-    if not any(i["id"] == item_id for i in items):
+    target_item = next((i for i in items if i["id"] == item_id), None)
+    if not target_item:
         return fail("not_found", "item not found", 404)
+    staged_path = (target_item.get("tg") or {}).get("source_path")
+    if staged_path:
+        staged_root = (Path(st.cfg.download_dir) / "studio").resolve()
+        candidate = Path(staged_path).resolve()
+        if candidate.parent == staged_root:
+            candidate.unlink(missing_ok=True)
     await repo.delete_item(st.db, item_id)
     rest = await repo.items_of(st.db, job_id)
     await repo.reorder_items(st.db, job_id, [i["id"] for i in rest])

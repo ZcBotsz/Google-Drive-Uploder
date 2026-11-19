@@ -484,6 +484,9 @@ class Worker:
                               overall_bytes_done=base_done, overall_bytes_total=totals["bytes"],
                               cancel=self._cancel_flags.setdefault(job_id, asyncio.Event()))
         self.hub.put(state)
+        if tg.get("source_path"):
+            state.on_tg(size, size)
+            self.hub.put(state)
         # The card used to change only at the start and end of a file, so on a
         # small file the user saw one frozen frame. This redraws it while the
         # bytes move — see core/animate.py.
@@ -495,7 +498,7 @@ class Worker:
 
         cfg = self.cfg
         mode = cfg.upload_mode
-        use_disk = mode == "disk" or (mode == "auto" and size > 0 and size < 32 * 1024 ** 2)
+        use_disk = bool(tg.get("source_path")) or mode == "disk" or (mode == "auto" and size > 0 and size < 32 * 1024 ** 2)
 
         session = item.get("drive") or {}
         drive_info: dict = {}
@@ -556,6 +559,9 @@ class Worker:
                             bytes_done=size, drive=drive_info, error="")
         await repo.add_quota(self.db, user_id, size, 1)
         await self._record_uploaded(job, item, drive_info, size)
+        source_path = (item.get("tg") or {}).get("source_path")
+        if source_path:
+            Path(source_path).unlink(missing_ok=True)
         fresh = await repo.recompute_totals(self.db, job_id)
         if msg_id:
             from ..tg.ratelimit import safe_edit
@@ -591,6 +597,13 @@ class Worker:
     # ── byte paths ───────────────────────────────────────────────────────
     async def _download_to_disk(self, item: dict, state: ProgressState) -> Path:
         tg = item["tg"]
+        source_path = tg.get("source_path")
+        if source_path:
+            path = Path(source_path).resolve()
+            expected = int(tg.get("size") or 0)
+            if not path.is_file() or path.stat().st_size != expected:
+                raise DriveError("The staged browser upload is missing or incomplete. Remove it and upload again.")
+            return path
         os.makedirs(self.cfg.download_dir, exist_ok=True)
         safe = "".join(c for c in (tg.get("name") or "file") if c.isalnum() or c in "._- ")[:80]
         path = Path(self.cfg.download_dir) / f"{item['id']}_{safe}"
@@ -661,7 +674,8 @@ class Worker:
             await _remember_uri()
             info = await up.upload(path, meta, path.stat().st_size)
         finally:
-            path.unlink(missing_ok=True)
+            if not (item.get("tg") or {}).get("source_path"):
+                path.unlink(missing_ok=True)
         drive = {"file_id": info.get("id", ""), "link": info.get("webViewLink", ""),
                  "session_uri": "", "committed": info.get("size", 0)}
         if not drive["link"] and drive["file_id"]:

@@ -2,10 +2,10 @@
    Classic script (no bundler); all app-*.js files share one global scope. */
 // ── loading screen (real boot steps, min 600 ms) ────────────────────────────
 const SPLASH_STEPS = [
-  [0.15, 'Connecting to Telegram…'],
-  [0.40, 'Verifying your session…'],
-  [0.62, 'Linking Google Drive…'],
-  [0.84, 'Loading your files…'],
+  [0.15, 'Opening your Studio…'],
+  [0.40, 'Verifying your sign-in…'],
+  [0.62, 'Checking Google Drive access…'],
+  [0.84, 'Loading your workspace…'],
   [1.00, 'Ready'],
 ];
 
@@ -70,6 +70,7 @@ async function boot() {
 }
 
 function hydrate(job) {
+  S.source = job.source || {};
   S.files = (job.items || []).map((it) => ({
     id: it.id, name: it.name, size: it.size, mime: it.mime,
     msg_id: it.msg_id, caption: it.caption || '',
@@ -236,12 +237,13 @@ function renderBottom() {
     const stop = el('button', 'btn danger', 'Cancel');
     stop.onclick = cancelJob;
     bar.appendChild(stop);
-    const studio = el('button', 'btn', '🌐 Studio');
-    studio.onclick = () => { toast('You are in the Studio'); };
-    bar.appendChild(studio);
   } else if (S.step === 'done') {
     const more = el('button', 'btn primary', '📤 Upload more');
-    more.onclick = () => toast('Send more files to the bot — a new job card appears');
+    more.onclick = () => {
+      S.jobId = ''; S.files = []; S.folder = { id: 'root', path: 'My Drive' };
+      history.replaceState(null, '', '/studio');
+      go('files');
+    };
     bar.appendChild(more);
   }
   bar.classList.toggle('hide', S.step === 'done' ? false : false);
@@ -259,7 +261,48 @@ function typeIcon(mime, name) {
   return ['📄', 'doc'];
 }
 
+async function uploadBrowserFiles(fileList, statusNode, button) {
+  const chosen = Array.from(fileList || []);
+  if (!chosen.length) return;
+  const form = new FormData();
+  for (const file of chosen) form.append('files', file, file.name);
+  if (S.jobId) form.append('job_id', S.jobId);
+  button.disabled = true;
+  statusNode.textContent = `Preparing ${chosen.length} file(s)…`;
+  try {
+    const result = await api('/api/uploads', { method: 'POST', body: form });
+    S.jobId = result.job.id;
+    history.replaceState(null, '', `/studio?job=${encodeURIComponent(S.jobId)}`);
+    hydrate(result.job);
+    statusNode.textContent = `${chosen.length} file(s) added. Review the folder, names and order, then start the upload.`;
+    render();
+    toast('Files added to your Studio job');
+  } catch (error) {
+    statusNode.textContent = error.message || 'Could not add these files. Check your connection and try again.';
+    statusNode.classList.add('bad');
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function viewFiles(view) {
+  const intake = el('section', 'card browser-intake');
+  const intakeTitle = el('h2', '', 'Upload from this device');
+  const intakeHelp = el('p', 'dim', 'Choose files here, then review the destination and options before starting the transfer.');
+  const fileInput = document.createElement('input');
+  fileInput.type = 'file';
+  fileInput.multiple = true;
+  fileInput.id = 'browserFileInput';
+  fileInput.className = 'sr-only';
+  fileInput.setAttribute('aria-label', 'Choose files to upload');
+  const pick = el('button', 'btn primary', 'Choose files');
+  pick.type = 'button';
+  pick.onclick = () => fileInput.click();
+  const intakeStatus = el('p', 'hint', 'Selected files stay private to your signed-in workspace and are sent to your connected Drive.');
+  intakeStatus.setAttribute('role', 'status');
+  fileInput.onchange = () => uploadBrowserFiles(fileInput.files, intakeStatus, pick);
+  intake.append(intakeTitle, intakeHelp, pick, fileInput, intakeStatus);
+  view.append(intake);
   const total = S.files.reduce((a, f) => a + f.size, 0);
   const head = el('div', 'card');
   head.innerHTML = `
@@ -300,7 +343,7 @@ function viewFiles(view) {
       return okName && okType;
     });
     if (!rows.length) {
-      list.innerHTML = `<p class="center dim">No files match. Send more files to the bot.</p>`;
+      list.innerHTML = `<p class="center dim">${S.files.length ? 'No files match your search or type filter.' : 'No files yet. Choose files above to start a Studio upload.'}</p>`;
       return;
     }
     rows.forEach((f) => {

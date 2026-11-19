@@ -9,10 +9,12 @@
 <meta name="description" content="Telegram → Google Drive uploader. Pick the folder, the names and the order.">
 <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/history.css">
   <script src="/static/app-base.js" defer></script>
   <script src="/static/app-core.js" defer></script>
   <script src="/static/app-views.js" defer></script>
   <script src="/static/app-live.js" defer></script>
+  <script src="/static/history.js" defer></script>
 <script src="https://telegram.org/js/telegram-web-app.js" defer></script>
 </head>
 <body>
@@ -32,11 +34,12 @@
 <!-- ── app ─────────────────────────────────────────────────────────────── -->
 <div class="app">
   <header class="topbar">
-    <div class="brand">
+    <a class="brand studio-home-link" href="/" aria-label="ZC Drive Upload home">
       <span class="logo">🚀</span>
       <span id="brandNameTop">ZC DRIVE</span>
-    </div>
+    </a>
     <div class="spacer"></div>
+    <button class="btn ghost studio-history-trigger" id="historyBtn" type="button" aria-haspopup="dialog">Past uploads</button>
     <span class="who" id="who"></span>
   </header>
 

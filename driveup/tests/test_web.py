@@ -15,6 +15,7 @@ import hmac
 import json
 import os
 import tempfile
+from pathlib import Path
 import time
 from urllib.parse import urlencode
 
@@ -107,7 +108,17 @@ async def make_job(web, user_id: int = 55, files=(("a.bin", b"1234"),)) -> str:
     return job_id
 
 
-# ── auth ───────────────────────────────────────────────────────────────────
+# ── public pages and auth ──────────────────────────────────────────────────
+async def test_homepage_is_public_and_studio_is_separate(web):
+    r = await web["client"].get("/")
+    assert r.status_code == 200
+    assert "UPLOAD IN STUDIO" in r.text
+    assert 'href="/studio"' in r.text
+    assert "private user" not in r.text.lower()
+    studio = await web["client"].get("/studio")
+    assert "Continue with Google Drive" in studio.text
+
+
 async def test_no_session_is_rejected(web):
     r = await web["client"].get("/api/me")
     assert r.status_code == 401
@@ -147,10 +158,23 @@ async def test_job_payload_and_ownership(web):
     job_id = await make_job(web)
     r = await c.get(f"/api/jobs/{job_id}")
     assert r.status_code == 200 and r.json()["id"] == job_id
-    # another user cannot see it
+    # Another ordinary user cannot read, patch, cancel, or export this job.
     c2 = await login(web, 77)
-    r2 = await c2.get(f"/api/jobs/{job_id}")
-    assert r2.status_code == 404
+    assert (await c2.get(f"/api/jobs/{job_id}")).status_code == 404
+    assert (await c2.patch(f"/api/jobs/{job_id}", json={"naming": {"template": "x"}})).status_code == 404
+    assert (await c2.post(f"/api/jobs/{job_id}/cancel")).status_code == 404
+    assert (await c2.get(f"/api/jobs/{job_id}/export.csv")).status_code == 404
+
+
+async def test_private_history_is_session_scoped(web):
+    assert (await web["client"].get("/api/jobs")).status_code == 401
+    owner = await login(web, 55)
+    own_job = await make_job(web, 55, files=(("private-a.mp4", b"a"),))
+    other_job = await make_job(web, 77, files=(("private-b.mp4", b"b"),))
+    rows = (await owner.get("/api/jobs")).json()["jobs"]
+    ids = {row["id"] for row in rows}
+    assert own_job in ids and other_job not in ids
+    assert all("private-b" not in str(row) for row in rows)
 
 
 async def test_patch_updates_destination_and_names(web):
@@ -222,6 +246,41 @@ async def test_start_requires_drive_connection(web):
     r = await c.post(f"/api/jobs/{job_id}/start", json={})
     assert r.status_code == 403
     assert "not_connected" in r.json()["code"] or "connect" in r.json()["message"].lower()
+
+
+async def test_browser_upload_is_private_and_uses_the_existing_worker(web):
+    unauthenticated = await web["client"].post("/api/uploads", files=[
+        ("files", ("blocked.bin", b"no session", "application/octet-stream"))])
+    assert unauthenticated.status_code == 401
+    owner = await login(web, 55)
+    await repo.save_drive_account(web["db"], 55, email="web@example.test",
+                                  enc_refresh=TokenCipher(web["cfg"].fernet_key()).enc("1//r"),
+                                  access="ya29.fake", expiry=9e12, scope="s", scope_mode="file")
+    response = await owner.post("/api/uploads", files=[
+        ("files", ("from-browser.bin", b"browser bytes", "application/octet-stream"))])
+    assert response.status_code == 200, response.text
+    job = response.json()["job"]
+    assert job["items"][0]["name"] == "from-browser.bin"
+    item = await repo.get_item(web["db"], job["items"][0]["id"])
+    staged = Path(item["tg"]["source_path"])
+    assert staged.is_file() and staged.read_bytes() == b"browser bytes"
+    async with AsyncClient(transport=ASGITransport(app=web["app"]), base_url="http://testserver") as other:
+        await other.post("/auth/telegram", json={"initData": sign_initdata(77)})
+        denied = await other.post("/api/uploads", data={"job_id": job["id"]}, files=[
+            ("files", ("intruder.bin", b"not mine", "application/octet-stream"))])
+        assert denied.status_code == 404
+    assert staged.read_bytes() == b"browser bytes"
+    start = await owner.post(f"/api/jobs/{job['id']}/start", json={})
+    assert start.status_code == 200
+    for _ in range(300):
+        current = (await owner.get(f"/api/jobs/{job['id']}")).json()
+        if current["status"] in ("done", "failed"):
+            break
+        await _sleep(0.05)
+    current = (await owner.get(f"/api/jobs/{job['id']}")).json()
+    assert current["status"] == "done"
+    assert not staged.exists()
+    assert web["fd"].uploaded
 
 
 async def test_full_upload_through_the_api(web):

@@ -9,7 +9,8 @@ function viewLive(view) {
   c.innerHTML = `
     <div class="row">
       <div class="grow"><h2>Uploading</h2>
-        <p class="dim" id="liveSub">waiting for the first chunk…</p></div>
+        <p class="dim" id="liveSub">waiting for the first chunk…</p>
+        <p class="hint" id="stageCaption"></p></div>
       <span class="pill info" id="livePill">running</span>
     </div>
     <div class="row" style="gap:18px;margin:8px 0 14px">
@@ -38,6 +39,8 @@ function viewLive(view) {
     </div>
     <div id="prows"></div>`;
   view.appendChild(c);
+  const firstHop = S.source?.kind === 'web_studio' ? 'Browser → Server' : 'Telegram → Server';
+  $('#stageCaption').textContent = `${firstHop} complete · Server → Drive in progress`;
 
   const con = el('div', 'card');
   con.innerHTML = `<h3>Log</h3><div class="console" id="consoleLog"
@@ -222,7 +225,7 @@ function viewDone(view) {
     };
     links.appendChild(r);
   });
-  if (!done.length) links.innerHTML = '<p class="dim">No links — check the log in the bot.</p>';
+  if (!done.length) links.innerHTML = '<p class="dim">No completed Drive files in this upload yet.</p>';
 
   $('#openFolder').onclick = () => {
     const id = job.destination?.folder_id;

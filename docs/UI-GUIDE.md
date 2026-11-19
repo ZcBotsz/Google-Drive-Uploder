@@ -13,10 +13,10 @@
 Button styling is chosen by action type: green/success for connecting or continuing, primary for normal navigation, and destructive for disconnect/discard/remove. Telegram clients may render button colors only when Bot API styles are supported. Animated emoji are separately feature-gated and only displayed where Telegram supports custom emoji; static emoji remain a fallback.
 
 ## Studio and admin
-The public home page leads directly to Google sign-in for Studio. The Studio itself does not add a password prompt; keep the existing session/OAuth checks. Admin remains protected by the existing authorization mechanisms. Preserve upload processing features, preview, queue, and job controls while adjusting presentation.
+The public home page routes to `/studio`; signed-out visitors see the existing Google sign-in action. The Studio itself does not add a password prompt. After sign-in, users can choose files from their browser, review folder/naming/order options, start the existing Drive worker, follow progress, and open their own past uploads. Browser files are staged under `DOWNLOAD_DIR/studio`; persistent disk is required for safe retries/recovery across restarts. The Studio sends the verified-session user identity to server-side ownership checks; browser-provided user IDs are not used. Admin remains protected by the existing authorization mechanisms.
 
 ## Accessibility and QA
-Use readable labels, meaningful status text, keyboard focus visibility, responsive layout, and progress descriptions rather than box-drawing glyphs. Test narrow/mobile widths, keyboard navigation, screen-reader names, connected/disconnected states, invalid links, expired sessions, and unauthorized admin callbacks.
+Use readable labels, meaningful status text, keyboard focus visibility, responsive layout, and progress descriptions rather than box-drawing glyphs. Studio history is fetched from a session-scoped API and contains only the signed-in user's jobs. Test narrow/mobile widths, keyboard navigation, connected/disconnected states, invalid links, expired sessions, empty history, upload limits, staged-file cleanup, and unauthorized/cross-user job access.
 
 ## Upload limits
 Displayed limits must be sourced from configured plans and Telegram API/deployment configuration. Actual Drive quota, Google API limits, local Bot API availability, and deployment settings also apply. API ID/hash alone do not enable a local Bot API server or larger transfers.

@@ -18,6 +18,7 @@
 
 const S = {
   jobId: '',
+  source: {},
   me: null,
   steps: ['files', 'folder', 'naming', 'sequence', 'review', 'live', 'done'],
   step: 'files',
@@ -101,10 +102,14 @@ function toast(msg, kind = '') {
 async function api(path, opts = {}) {
   const init = {
     credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { ...(opts.headers || {}) },
     ...opts,
   };
-  if (init.body && typeof init.body !== 'string') init.body = JSON.stringify(init.body);
+  const isForm = typeof FormData !== 'undefined' && init.body instanceof FormData;
+  if (init.body && typeof init.body !== 'string' && !isForm) {
+    init.body = JSON.stringify(init.body);
+    init.headers['Content-Type'] = 'application/json';
+  }
   const tgInit = window.Telegram?.WebApp?.initData;
   if (tgInit) init.headers['X-Telegram-Init-Data'] = tgInit;
   let r;

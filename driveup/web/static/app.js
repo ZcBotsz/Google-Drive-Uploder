@@ -5,4 +5,9 @@
 window.DU = { S, api, go, render, toast, cmpNatural, humanBytes, refreshPreview,
               startUpload, attachSSE, fireConfetti, setRing, naturalKey };
 
-document.addEventListener('DOMContentLoaded', () => { wireGlobal(); boot(); });
+document.addEventListener('DOMContentLoaded', () => {
+  wireGlobal();
+  const historyButton = $('#historyBtn');
+  if (historyButton) historyButton.addEventListener('click', showUploadHistory);
+  boot();
+});
