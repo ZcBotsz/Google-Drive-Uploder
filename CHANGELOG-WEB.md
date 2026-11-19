@@ -1,6 +1,7 @@
 # Web experience update — 2026-11-18
 
 - Made `/` open the Studio at `/studio`, as requested; kept the public product/plan page at `/home`. The workspace remains same-domain and account-protected.
+- Changed the signed-in Studio’s no-job landing state to a private dashboard with recent job summaries, a distinct **Start an upload** action, and access to past uploads. Opening a specific job still opens its existing review/progress flow. The bot and worker transfer flow remain unchanged.
 - Repointed homepage CTAs to the Studio and corrected the Studio boot state to describe browser/session startup rather than Telegram connection.
 - Added session-scoped browser file intake at `POST /api/uploads`, with current-user job ownership checks, configured per-file/job/daily limits, staged files, and handoff to the existing Drive worker.
 - Added a private `/api/jobs` history endpoint and a Studio "Past uploads" dialog; users only receive their own job summaries. Cross-user tests cover read, patch, cancel, export, and attempt to append browser files to another user's draft.

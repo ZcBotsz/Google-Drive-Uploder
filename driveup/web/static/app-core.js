@@ -35,6 +35,7 @@ async function boot() {
     if (tg) { try { tg.ready(); tg.expand(); } catch (_) {} }
     const jobId = new URLSearchParams(location.search).get('job') || '';
     S.jobId = jobId;
+    S.dashboard = !jobId;
     bump();
     S.me = await api('/api/me' + (jobId ? `?job=${encodeURIComponent(jobId)}` : ''));
     bump();
@@ -186,6 +187,7 @@ const tintObserver = new MutationObserver((records) => {
 if (document.body) tintObserver.observe(document.body, { childList: true, subtree: true });
 
 function render(back = false) {
+  if (S.dashboard) return renderDashboard();
   renderSteps();
   const view = $('#view');
   view.className = 'screen' + (back ? ' back' : '');

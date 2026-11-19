@@ -17,6 +17,7 @@
 'use strict';
 
 const S = {
+  dashboard: false,
   jobId: '',
   source: {},
   me: null,
