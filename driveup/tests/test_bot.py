@@ -93,7 +93,7 @@ async def connect_drive(env, uid: int = USER) -> None:
 # ── commands ───────────────────────────────────────────────────────────────
 async def test_start_welcomes_and_stores_the_user(botenv):
     await feed(botenv, fake_tg.message("/start", uid=USER))
-    assert "DriveUp" in said(botenv) or "welcome" in said(botenv).lower()
+    assert "ᴢᴄ ᴅʀɪᴠᴇ ᴜᴘʟᴏᴀᴅ" in said(botenv).lower()
     assert await repo.get_user(botenv["db"], USER)
 
 

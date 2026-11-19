@@ -414,7 +414,7 @@ async def api_children(request: Request, parent: str = "root", page: str = "",
                        user=Depends(session_user)):
     client = await _client(request, user)
     if client is None:
-        return fail("not_connected", "Google Drive is not connected — send /connect to the bot", 409)
+        return fail("not_connected", "Google Drive is not connected — sign in with Google to reconnect", 409)
     try:
         data = await client.list_folders(parent, page_token=page)
         about = {}
@@ -532,13 +532,52 @@ async def api_del_favourite(request: Request, folder_id: str, user=Depends(sessi
 
 
 # ── Google OAuth ────────────────────────────────────────────────────────────
+@router.get("/auth/google/login")
+async def google_web_login(request: Request):
+    """Start a bot-free Studio session using Google Drive OAuth directly."""
+    st = state_of(request)
+    sid = request.cookies.get(SESSION_COOKIE, "")
+    existing = await repo.get_session(st.db, sid) if sid else None
+    if existing:
+        user = await repo.get_user(st.db, existing["user_id"])
+        account = await repo.get_drive_account(st.db, existing["user_id"])
+        if user and account:
+            return RedirectResponse("/studio", status_code=303)
+        if user:
+            state = oauth.new_state()
+            verifier = oauth.new_verifier()
+            await repo.create_state(st.db, state, user["user_id"], verifier)
+            resp = RedirectResponse(oauth.build_authorize_url(st.cfg, state, verifier), status_code=303)
+            resp.set_cookie("du_oauth_state", state, max_age=900, httponly=True,
+                            secure=request.headers.get("x-forwarded-proto", request.url.scheme).split(",")[0].strip() == "https",
+                            samesite="lax", path="/")
+            return resp
+    # Negative, high-entropy web-only IDs cannot collide with Telegram's positive IDs.
+    user_id = -(secrets.randbelow(2**50) + 2**40)
+    while await repo.get_user(st.db, user_id):
+        user_id = -(secrets.randbelow(2**50) + 2**40)
+    await repo.upsert_user(st.db, user_id, name="Web user", username="web", lang="en")
+    state = oauth.new_state()
+    verifier = oauth.new_verifier()
+    await repo.create_state(st.db, state, user_id, verifier)
+    resp = RedirectResponse(oauth.build_authorize_url(st.cfg, state, verifier), status_code=303)
+    resp.set_cookie("du_oauth_state", state, max_age=900, httponly=True,
+                    secure=request.headers.get("x-forwarded-proto", request.url.scheme).split(",")[0].strip() == "https",
+                            samesite="lax", path="/")
+    return resp
+
+
 @router.get("/auth/google/start")
 async def google_start(request: Request, user=Depends(session_user)):
     st = state_of(request)
     state = oauth.new_state()
     verifier = oauth.new_verifier()
     await repo.create_state(st.db, state, user["user_id"], verifier)
-    return RedirectResponse(oauth.build_authorize_url(st.cfg, state, verifier))
+    resp = RedirectResponse(oauth.build_authorize_url(st.cfg, state, verifier), status_code=303)
+    resp.set_cookie("du_oauth_state", state, max_age=900, httponly=True,
+                    secure=request.headers.get("x-forwarded-proto", request.url.scheme).split(",")[0].strip() == "https",
+                            samesite="lax", path="/")
+    return resp
 
 
 @router.get("/auth/google/callback")
@@ -549,7 +588,10 @@ async def google_callback(request: Request, code: str = "", state: str = "",
         return HTMLResponse(f"<h2>Google said no</h2><p>{error}</p>", status_code=400)
     row = await repo.take_state(st.db, state)
     if not row:
-        return HTMLResponse("<h2>This link expired</h2><p>Open /connect in the bot again.</p>",
+        return HTMLResponse("<h2>This sign-in link expired</h2><p>Return to ZC Drive Upload and sign in again.</p>",
+                            status_code=400)
+    if int(row.get("user_id") or 0) < 0 and request.cookies.get("du_oauth_state") != state:
+        return HTMLResponse("<h2>Sign-in could not be verified</h2><p>Restart Google sign-in from this browser.</p>",
                             status_code=400)
     try:
         info = await st.accounts.connect_from_code(row["user_id"], code, row["code_verifier"])
@@ -570,12 +612,21 @@ async def google_callback(request: Request, code: str = "", state: str = "",
     <p><b>{info.get('email') or 'your account'}</b><br>{free} free of {total}</p>
     <p>You can close this tab and go back to Telegram.</p></div>"""
     try:
-        await st.bot.send_message(row["user_id"],
-                                  f"✅ Connected as <b>{info.get('email')}</b> · {free} free of {total}",
-                                  parse_mode="HTML")
+        if int(row["user_id"]) > 0:
+            await st.bot.send_message(row["user_id"],
+                                      f"✅ Connected as <b>{info.get('email')}</b> · {free} free of {total}",
+                                      parse_mode="HTML")
     except Exception:                                       # noqa: BLE001
         pass
-    return HTMLResponse(html)
+    sid = await mint_session(
+        st.db, int(row["user_id"]),
+        request.client.host if request.client else "",
+        request.headers.get("user-agent", ""))
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme).split(",")[0].strip()
+    response = RedirectResponse("/studio", status_code=303)
+    set_session_cookie(response, sid, secure=proto == "https")
+    response.delete_cookie("du_oauth_state", path="/")
+    return response
 
 
 @router.post("/auth/telegram")

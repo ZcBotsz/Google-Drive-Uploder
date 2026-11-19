@@ -435,14 +435,23 @@ async def test_homepage_shows_the_zc_driveup_landing_site(web):
     r = await web["client"].get("/")
     assert r.status_code == 200
     assert "ZC DRIVE UPLOAD" in r.text and "Send it once." in r.text
-    assert "Telegram → Server" in r.text and "Server → Drive" in r.text
+    assert "Browser → Server" in r.text and "Server → Drive" in r.text
+    assert 'href="/auth/google/login"' in r.text
     assert "₹499" in r.text and "up to 750 GB/day" in r.text
     assert "/studio" in r.text and "@ZCQXx" in r.text
 
 
-async def test_studio_without_session_explains_how_to_open(web):
+async def test_google_web_login_starts_without_telegram_session(web):
+    r = await web["client"].get("/auth/google/login", follow_redirects=False)
+    assert r.status_code == 303
+    assert "accounts.google.com" in r.headers["location"] or "googleapis.com" in r.headers["location"]
+    assert "du_oauth_state" in r.headers.get("set-cookie", "")
+
+
+async def test_studio_without_session_offers_direct_google_login(web):
     r = await web["client"].get("/studio")
-    assert r.status_code == 200 and "Open this page from the bot" in r.text
+    assert r.status_code == 200 and "Continue with Google Drive" in r.text
+    assert "/auth/google/login" in r.text
 
 
 async def test_studio_with_session_serves_the_upload_workspace(web):

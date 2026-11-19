@@ -90,7 +90,7 @@ def main_menu_kb(*, is_admin: bool = False, lang: str = "en") -> KM:
     rows = [
         [success("Connect Drive", icon="🔗", callback_data="m:connect"),
          primary("Upload Studio", icon="🌐", callback_data="m:studio")],
-        [primary("More", icon="📊", callback_data="ui:more")],
+        [primary("Account & Tools", icon="📊", callback_data="ui:more")],
     ]
     if is_admin:
         rows.append([primary("Admin Tools", icon="⚙️", callback_data="ui:admin")])

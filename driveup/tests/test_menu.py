@@ -31,6 +31,10 @@ def test_menu_rows_are_phone_sized():
     kb = main_menu_kb(is_admin=True)
     for row in kb.inline_keyboard:
         assert len(row) <= 2, f"a row of {len(row)} would wrap badly on a phone"
+    from driveup.strings import sc
+    labels = [b.text for row in kb.inline_keyboard for b in row]
+    assert len(labels) == 4  # 3 compact user actions + 1 authorized admin shortcut
+    assert sc("Account & Tools") in labels
 
 
 async def test_hello_greets_and_offers_buttons(botenv):

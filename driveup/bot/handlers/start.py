@@ -46,14 +46,23 @@ async def cmd_start(msg: Message, **data):
     from ...config import effective_max_file_mb
     cap_mb = effective_max_file_mb(app.cfg)
     welcome = (
-        f"🚀 <b>DriveUp · {sc(BRAND_NAME)} GOOGLE DRIVE UPLOADER</b>\n"
-        "<i>Fast, guided transfers from Telegram to your Drive.</i>\n\n"
-        "1. Connect your Google Drive.\n"
-        "2. Send a file or a direct link.\n"
-        "3. Choose a folder, review the name and order, then start.\n\n"
-        f"📦 <b>Current per-file ceiling:</b> {cap_mb} MB. "
-        "Google Drive storage and service limits still apply.\n\n"
-        "Choose an option below — no command typing required."
+        f"╭━━━━〔 🚀 <b>{sc('ZC DRIVE UPLOAD')}</b> 🚀 〕━━━━╮\n"
+        f"│  <i>{sc('TELEGRAM · STUDIO · GOOGLE DRIVE')}</i>  │\n"
+        "╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
+        f"👋 <b>{sc('WELCOME')}</b>\n"
+        "Connect your Google Drive, send a file or supported link, and follow its progress. "
+        "Or open Studio to upload directly from your browser.\n\n"
+        f"🚀 <b>{sc('WHAT YOU CAN DO')}</b>\n"
+        f"• {sc('UPLOAD FILES AND SUPPORTED LINKS')}\n"
+        f"• {sc('CHOOSE DRIVE FOLDERS · RENAME · REORDER')}\n"
+        f"• {sc('TRACK TELEGRAM → SERVER → DRIVE')}\n"
+        f"• {sc('VIEW YOUR QUEUE · HISTORY · STATS')}\n\n"
+        f"⭐ <b>{sc('MAX · ₹499 / MONTH')}</b>\n"
+        f"{sc('UP TO 750 GB / DAY · 4 CONCURRENT JOBS · 5,000 FILES / JOB')}\n"
+        f"📦 {sc('FILE CEILING')}: {cap_mb} MB · "
+        f"{sc('DRIVE QUOTA AND SERVICE LIMITS APPLY')}\n\n"
+        f"💬 {sc('SUPPORT')}: @ZCQXx\n"
+        f"<i>{sc('CHOOSE AN ACTION BELOW')}</i>"
     )
     missing = await app.access.force_sub_missing(user["user_id"])
     payload = (msg.text or "").partition(" ")[2].strip().lower()

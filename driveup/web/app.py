@@ -164,18 +164,7 @@ def create_app(*, db, cfg: Settings, bot, worker, accounts, access, hub=None,
         sid = request.cookies.get("du_session")
         if sid and await repo.get_session(st.db, sid):
             return RedirectResponse("/auth/google/start", status_code=303)
-        return HTMLResponse(
-            '<!doctype html><meta charset=utf-8>'
-            '<meta name=viewport content="width=device-width,initial-scale=1">'
-            '<meta name=theme-color content="#081014"><title>Connect Drive</title>'
-            '<body style="background:#081014;color:#e8f6fa;font:16px system-ui;'
-            'display:grid;place-items:center;min-height:100vh;margin:0;text-align:center">'
-            '<div style="max-width:340px;padding:24px"><div style="font-size:46px">🔗</div>'
-            '<h2 style="margin:10px 0 6px">Link Google Drive from the bot</h2>'
-            '<p style="color:#7fa3ad;font-size:.9rem">Send <b>/connect</b> to the bot and tap '
-            'the button it replies with — that link carries your session. '
-            'Opening this page directly cannot work, by design.</p></div></body>',
-            status_code=200)
+        return RedirectResponse("/auth/google/login", status_code=303)
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
@@ -183,9 +172,8 @@ def create_app(*, db, cfg: Settings, bot, worker, accounts, access, hub=None,
         home = STATIC / "home.html"
         if not home.exists():
             return HTMLResponse(f"<h1>{html.escape(BRAND_NAME)}</h1><a href='/studio'>Open Studio</a>")
-        username = (request.app.state.cfg.login_widget_bot_username or "").strip().lstrip("@")
-        bot_link = f"https://t.me/{username}?start=studio" if re.fullmatch(r"[A-Za-z0-9_]{5,32}", username) else "/studio"
-        body = home.read_text(encoding="utf-8").replace("{{BOT_LINK}}", html.escape(bot_link, quote=True))
+        # Public CTA begins the bot-free Google OAuth login; no Telegram deep-link is needed.
+        body = home.read_text(encoding="utf-8").replace("{{BOT_LINK}}", "/auth/google/login")
         return HTMLResponse(body, status_code=200)
 
     @app.get("/studio", response_class=HTMLResponse)
@@ -203,10 +191,10 @@ def create_app(*, db, cfg: Settings, bot, worker, accounts, access, hub=None,
             <div class="blocker"><div class="inner">
               <div class="icon">🚀</div>
               <h1>{html.escape(BRAND_NAME)} Studio</h1>
-              <p>Open this page from the bot — tap <b>🌐 Open Upload Studio</b> or send
-                 <code>/studio</code>. The link carries a signed session.</p>
-              <p class="hint">Already have a link? Send <code>/studio</code> again to get a fresh one.</p>
-              <p><a href="/">Back to ZC DriveUp</a></p>
+              <p>Sign in with Google to connect your Drive and open the Studio. You can use the website directly; Telegram is optional.</p>
+              <p><a class="btn primary" href="/auth/google/login">Continue with Google Drive</a></p>
+              <p class="hint">Your files remain in the Google account you authorize. The connected Drive quota and service limits still apply.</p>
+              <p><a href="/">Back to ZC Drive Upload</a></p>
             </div></div></body></html>"""
             return HTMLResponse(html_body, status_code=200)
         return HTMLResponse((STATIC / "index.html").read_text(encoding="utf-8"))

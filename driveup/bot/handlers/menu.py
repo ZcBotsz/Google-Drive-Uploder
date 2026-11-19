@@ -22,10 +22,10 @@ from ..ui.buttons import plain, primary
 log = logging.getLogger("driveup.handlers.menu")
 router = Router(name="menu")
 MAIN_TEXT = (
-    f"<b>🚀 {sc('ZC DRIVEUP')} · {sc('MAIN MENU')}</b>\n\n"
-    "Your Telegram-to-Drive workspace. Connect once, send files or links, "
-    "then choose the folder and upload options.\n\n"
-    "Pick a button below to continue."
+    f"🚀 <b>{sc('ZC DRIVE UPLOAD')}</b>\n"
+    f"<i>{sc('YOUR DRIVE · YOUR FILES · YOUR CONTROL')}</i>\n\n"
+    "Connect Google Drive, open the browser Studio, or find account and upload tools.\n\n"
+    f"{sc('THREE CLEAR CHOICES · NO COMMANDS NEEDED')}"
 )
 MORE_TEXT = f"<b>{sc('DRIVEUP TOOLS')}</b>\nChoose a section. The menu stays in this message."
 

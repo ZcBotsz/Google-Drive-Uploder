@@ -92,10 +92,10 @@ async def test_expired_start_link_explains_itself(web):
     assert "du_session" not in r.cookies
 
 
-async def test_connect_without_session_explains_how_to_get_one(web):
-    r = await web["client"].get("/connect")
-    assert r.status_code == 200                    # never a bare 404/401
-    assert "/connect" in r.text
+async def test_connect_without_session_starts_google_login(web):
+    r = await web["client"].get("/connect", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/auth/google/login"
 
 
 async def test_studio_page_serves_the_app_when_signed_in(web):

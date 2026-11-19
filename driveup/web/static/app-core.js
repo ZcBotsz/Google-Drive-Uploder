@@ -121,10 +121,12 @@ function showAuthWall(msg) {
   wrap.id = 'authwall';
   const inner = el('div', 'inner');
   inner.appendChild(el('div', 'icon', '🔐'));
-  inner.appendChild(el('h1', '', 'Open the Studio from the bot'));
-  inner.appendChild(el('p', '', esc(msg || 'Your session expired.')));
-  inner.appendChild(el('p', 'hint',
-    'Send /studio to the bot — it replies with a fresh, signed link.'));
+  inner.appendChild(el('h1', '', 'Your Studio session ended'));
+  inner.appendChild(el('p', '', esc(msg || 'Sign in again to continue.')));
+  const login = el('a', 'btn primary', 'Continue with Google Drive');
+  login.href = '/auth/google/login';
+  inner.appendChild(login);
+  inner.appendChild(el('p', 'hint', 'You can use the Studio directly on this website; Telegram is optional.'));
   wrap.appendChild(inner);
   document.body.appendChild(wrap);
 }
@@ -343,7 +345,7 @@ async function loadTree(folderId = 'root') {
   } catch (e) {
     if (e.message.includes('not connected')) showBlocker({
       kind: 'locked', title: 'Google Drive not connected',
-      message: 'Open the bot and send /connect — then come back here.',
+      message: 'Your Google Drive connection is missing. Sign in again to connect your Drive directly on this website.',
     });
     return [];
   }
