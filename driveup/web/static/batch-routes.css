@@ -1,0 +1,10 @@
+.batch-route-panel{margin:12px 0;padding:12px;border:1px solid var(--line);border-radius:var(--r-md);background:rgba(5,14,18,.38)}
+.browser-progress{height:9px;overflow:hidden;border-radius:99px;background:var(--surface-3);margin:10px 0 6px}
+.browser-progress[hidden]{display:none}
+.browser-progress-fill{display:block;width:0;height:100%;border-radius:inherit;background:linear-gradient(90deg,var(--accent),var(--accent-2));transition:width .12s linear}
+@media(prefers-reduced-motion:reduce){.browser-progress-fill{transition:none}}
+.batch-route-rows{display:grid;gap:8px;margin:10px 0}
+.batch-route-row{display:grid;grid-template-columns:minmax(120px,1fr) minmax(80px,130px) auto;gap:8px;align-items:center}
+.batch-route-row input{min-width:0}
+.batch-route-summary{font-variant-numeric:tabular-nums}
+@media(max-width:520px){.batch-route-row{grid-template-columns:minmax(100px,1fr) minmax(68px,88px) auto;gap:5px}.batch-route-row .btn{padding:8px 9px;font-size:.75rem}}

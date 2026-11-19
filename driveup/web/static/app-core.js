@@ -39,7 +39,10 @@ async function boot() {
     S.me = await api('/api/me' + (jobId ? `?job=${encodeURIComponent(jobId)}` : ''));
     bump();
     if (S.me.blocked) { showBlocker(S.me.blocked); return; }
-    if (S.me.job) hydrate(S.me.job);
+    if (S.me.job) {
+      S.jobId = S.me.job.id || S.jobId;
+      hydrate(S.me.job);
+    }
     bump();
     $('#who').textContent = S.me.user?.username ? '@' + S.me.user.username
       : (S.me.user?.name || `id ${S.me.userId}`);
@@ -78,6 +81,7 @@ function hydrate(job) {
   if (job.destination?.folder_id) {
     S.folder = { id: job.destination.folder_id, path: job.destination.path || 'My Drive' };
     S.split = (job.destination && job.destination.split) || null;
+    S.folderGroups = (S.split && S.split.groups) || [];
     S.selected = job.destination.folder_id;
   }
   if (job.naming) Object.assign(S.naming, job.naming);
@@ -191,6 +195,7 @@ function render(back = false) {
     review: viewReview, live: viewLive, done: viewDone,
   }[S.step];
   fn(view);
+  if (S.step === 'live' && S.jobId) attachSSE();
   renderBottom();
 }
 
@@ -218,7 +223,14 @@ function renderBottom() {
     bar.appendChild(n);
   } else if (S.step === 'folder') {
     const n = el('button', 'btn primary', 'Next: naming ›');
-    n.onclick = () => go('naming');
+    n.onclick = () => {
+      if ($('#splitMode')?.value === 'batches') {
+        const split = currentSplit();
+        if (!split) return toast(`Use unique folder names, positive counts, and assign exactly ${S.files.length} files.`, 'err');
+        S.split = split;
+      } else S.split = currentSplit();
+      go('naming');
+    };
     bar.appendChild(n);
   } else if (S.step === 'naming') {
     const n = el('button', 'btn primary', 'Next: sequence ›');
@@ -261,25 +273,84 @@ function typeIcon(mime, name) {
   return ['📄', 'doc'];
 }
 
-async function uploadBrowserFiles(fileList, statusNode, button) {
+function postMultipartWithProgress(url, form, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', url);
+    xhr.withCredentials = true;
+    const initData = window.Telegram?.WebApp?.initData;
+    if (initData) xhr.setRequestHeader('X-Telegram-Init-Data', initData);
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && onProgress) onProgress(event.loaded / Math.max(1, event.total));
+    };
+    xhr.onerror = () => reject(new Error('Network interrupted while sending this batch.'));
+    xhr.onload = () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText || '{}'); } catch (_) {}
+      if (xhr.status >= 200 && xhr.status < 300 && data.ok) return resolve(data);
+      const message = data.message || `Upload request failed (${xhr.status}).`;
+      if (xhr.status === 401) showAuthWall(message);
+      reject(new Error(message));
+    };
+    xhr.send(form);
+  });
+}
+
+async function uploadBrowserFiles(fileList, statusNode, button, progressBar) {
   const chosen = Array.from(fileList || []);
   if (!chosen.length) return;
-  const form = new FormData();
-  for (const file of chosen) form.append('files', file, file.name);
-  if (S.jobId) form.append('job_id', S.jobId);
+  const totalBytes = chosen.reduce((sum, file) => sum + file.size, 0);
+  const plan = S.me?.plan || {};
+  const maxFiles = Number(plan.max_files_job || 5000);
+  if (S.files.length + chosen.length > maxFiles) {
+    return toast(`This job would exceed your ${maxFiles}-file plan limit.`, 'err');
+  }
+  const maxFileBytes = Number(plan.max_file_mb || 0) * 1024 ** 2;
+  const tooLarge = chosen.find((file) => maxFileBytes && file.size > maxFileBytes);
+  if (tooLarge) return toast(`${tooLarge.name} exceeds your ${plan.max_file_mb} MB per-file limit.`, 'err');
+  const dailyBytes = Number(plan.daily_gb || 0) * 1024 ** 3;
+  const alreadyUsed = Number(S.me?.usage_today?.bytes || 0) + S.files.reduce((sum, file) => sum + file.size, 0);
+  if (dailyBytes && alreadyUsed + totalBytes > dailyBytes) {
+    return toast('This selection exceeds the remaining daily upload allowance.', 'err');
+  }
+  const chunkSize = 20;
+  let completedFiles = 0, completedBytes = 0;
   button.disabled = true;
-  statusNode.textContent = `Preparing ${chosen.length} file(s)…`;
+  progressBar.hidden = false;
+  progressBar.setAttribute('aria-valuenow', '0');
+  progressBar.querySelector('.browser-progress-fill').style.width = '0%';
   try {
-    const result = await api('/api/uploads', { method: 'POST', body: form });
-    S.jobId = result.job.id;
+    for (let offset = 0; offset < chosen.length; offset += chunkSize) {
+      const batch = chosen.slice(offset, offset + chunkSize);
+      const batchBytes = batch.reduce((sum, file) => sum + file.size, 0);
+      const form = new FormData();
+      for (const file of batch) form.append('files', file, file.name);
+      if (S.jobId) form.append('job_id', S.jobId);
+      statusNode.textContent = `Sending files ${offset + 1}–${offset + batch.length} of ${chosen.length} to your private Studio…`;
+      const result = await postMultipartWithProgress('/api/uploads', form, (fraction) => {
+        const pct = totalBytes ? Math.round((completedBytes + fraction * batchBytes) / totalBytes * 100)
+          : Math.round((completedFiles + fraction * batch.length) / chosen.length * 100);
+        progressBar.setAttribute('aria-valuenow', String(pct));
+        progressBar.querySelector('.browser-progress-fill').style.width = `${pct}%`;
+        statusNode.textContent = `Sending ${Math.min(chosen.length, completedFiles + batch.length)} of ${chosen.length} files · ${pct}%`;
+      });
+      S.jobId = result.job.id;
+      hydrate(result.job);
+      completedFiles += batch.length;
+      completedBytes += batchBytes;
+    }
     history.replaceState(null, '', `/studio?job=${encodeURIComponent(S.jobId)}`);
-    hydrate(result.job);
-    statusNode.textContent = `${chosen.length} file(s) added. Review the folder, names and order, then start the upload.`;
+    statusNode.textContent = `${completedFiles} file(s) are ready. Review folder assignments, naming and order, then start the upload.`;
+    progressBar.setAttribute('aria-valuenow', '100');
+    progressBar.querySelector('.browser-progress-fill').style.width = '100%';
     render();
     toast('Files added to your Studio job');
   } catch (error) {
-    statusNode.textContent = error.message || 'Could not add these files. Check your connection and try again.';
+    const message = `${completedFiles} of ${chosen.length} files were added. This draft is saved; select only the remaining files to continue. ${error.message || ''}`;
+    statusNode.textContent = message;
     statusNode.classList.add('bad');
+    render();
+    toast(message, 'err');
   } finally {
     button.disabled = false;
   }
@@ -298,10 +369,17 @@ function viewFiles(view) {
   const pick = el('button', 'btn primary', 'Choose files');
   pick.type = 'button';
   pick.onclick = () => fileInput.click();
-  const intakeStatus = el('p', 'hint', 'Selected files stay private to your signed-in workspace and are sent to your connected Drive.');
+  const intakeStatus = el('p', 'hint', 'Selected files stay private to your signed-in workspace and are sent to your connected Drive. Large selections are transferred in small batches.');
   intakeStatus.setAttribute('role', 'status');
-  fileInput.onchange = () => uploadBrowserFiles(fileInput.files, intakeStatus, pick);
-  intake.append(intakeTitle, intakeHelp, pick, fileInput, intakeStatus);
+  const progressBar = el('div', 'browser-progress');
+  progressBar.hidden = true;
+  progressBar.setAttribute('role', 'progressbar');
+  progressBar.setAttribute('aria-label', 'File selection transfer to Studio');
+  progressBar.setAttribute('aria-valuemin', '0'); progressBar.setAttribute('aria-valuemax', '100');
+  progressBar.setAttribute('aria-valuenow', '0');
+  progressBar.innerHTML = '<span class="browser-progress-fill"></span>';
+  fileInput.onchange = () => uploadBrowserFiles(fileInput.files, intakeStatus, pick, progressBar);
+  intake.append(intakeTitle, intakeHelp, pick, fileInput, progressBar, intakeStatus);
   view.append(intake);
   const total = S.files.reduce((a, f) => a + f.size, 0);
   const head = el('div', 'card');
@@ -430,11 +508,18 @@ function viewFolder(view) {
         <option value="season">By season — from S01E02 names</option>
         <option value="date">By month — 2026-11</option>
         <option value="custom">By my own rule</option>
+        <option value="batches">By folder counts (manual)</option>
       </select>
       <input type="text" id="splitRule" placeholder="Rule: match text → folder name"
              style="flex:1;display:none">
       <input type="text" id="splitElse" placeholder="Everything else → Other"
              style="max-width:230px;display:none">
+    </div>
+    <div id="batchRoutePanel" class="batch-route-panel" style="display:none">
+      <p class="hint">Create or reuse child folders under the selected Drive folder. Counts assign consecutive files in the Files list; all counts must add up to the job. Later filename/order edits do not change a file’s folder assignment.</p>
+      <div id="batchRouteRows" class="batch-route-rows"></div>
+      <button type="button" class="btn sm" id="addBatchRoute">＋ Add folder group</button>
+      <p class="hint" id="batchRouteSummary" role="status"></p>
     </div>
     <p class="hint" id="splitPreview"></p>`;
   view.appendChild(card);
@@ -551,16 +636,46 @@ function viewFolder(view) {
   // ── per-group destinations ─────────────────────────────────────────────
   const SPLIT_KEY = 'du.split';
   const saved = S.split || JSON.parse(localStorage.getItem(SPLIT_KEY) || '{"mode":"none"}');
+  const drawBatchRows = () => {
+    const box = $('#batchRouteRows');
+    if (!box) return;
+    box.innerHTML = '';
+    S.folderGroups.forEach((group, index) => {
+      const row = el('div', 'batch-route-row');
+      const name = document.createElement('input');
+      name.type = 'text'; name.maxLength = 80; name.value = group.name || `Folder ${index + 1}`;
+      name.setAttribute('aria-label', `Folder name for group ${index + 1}`);
+      name.placeholder = `Folder ${index + 1}`;
+      const count = document.createElement('input');
+      count.type = 'number'; count.min = '1'; count.max = String(Math.max(1, S.files.length));
+      count.step = '1'; count.value = group.count ? String(group.count) : '';
+      count.setAttribute('aria-label', `Number of files for group ${index + 1}`);
+      count.placeholder = 'Files';
+      const remove = el('button', 'btn ghost sm', 'Remove');
+      remove.type = 'button'; remove.setAttribute('aria-label', `Remove folder group ${index + 1}`);
+      name.oninput = () => { group.name = name.value; drawSplitPreview(); };
+      count.oninput = () => { group.count = Math.max(0, Number.parseInt(count.value || '0', 10) || 0); drawSplitPreview(); };
+      remove.onclick = () => { S.folderGroups.splice(index, 1); drawBatchRows(); drawSplitPreview(); };
+      row.append(name, count, remove); box.append(row);
+    });
+  };
   const setSplit = () => {
     $('#splitMode').value = saved.mode || 'none';
     const custom = saved.mode === 'custom';
+    const batches = saved.mode === 'batches';
     $('#splitRule').style.display = custom ? '' : 'none';
     $('#splitElse').style.display = custom ? '' : 'none';
+    $('#batchRoutePanel').style.display = batches ? '' : 'none';
     if (custom) {
       const r0 = (saved.rules || [])[0] || {};
       $('#splitRule').value = r0.match ? `${r0.match} → ${r0.folder}` : '';
       $('#splitElse').value = saved['else'] || '';
     }
+    if (batches && !S.folderGroups.length) {
+      S.folderGroups = saved.groups?.length ? saved.groups.map((g) => ({ ...g }))
+        : Array.from({ length: Math.min(4, Math.max(1, S.files.length)) }, (_, i) => ({ name: `Folder ${i + 1}`, count: 0 }));
+    }
+    drawBatchRows();
     drawSplitPreview();
   };
   const drawSplitPreview = () => {
@@ -568,6 +683,20 @@ function viewFolder(view) {
     const box = $('#splitPreview');
     if (mode === 'none') {
       box.textContent = `Everything goes into “${S.folder.path}”.`;
+      return;
+    }
+    if (mode === 'batches') {
+      let cursor = 0;
+      const total = S.folderGroups.reduce((sum, g) => sum + (Number(g.count) || 0), 0);
+      const ranges = S.folderGroups.map((g) => {
+        const n = Number(g.count) || 0;
+        const first = cursor + 1; cursor += n;
+        return n ? `${esc(g.name || 'Untitled folder')}: files ${first}–${cursor} (${n})` : `${esc(g.name || 'Untitled folder')}: set file count`;
+      });
+      const valid = total === S.files.length && S.files.length > 0 && S.folderGroups.every((g) => g.name.trim() && Number(g.count) > 0);
+      $('#batchRouteSummary').textContent = `${total} of ${S.files.length} files assigned${valid ? ' ✓' : ` · assign exactly ${S.files.length}`}`;
+      box.innerHTML = ranges.map((line) => `<span>${line}</span>`).join(' · ');
+      $('#batchRouteSummary').classList.toggle('bad', !valid);
       return;
     }
     const sample = (S.files || []).map((f) => ({ name: f.name || '', id: f.id }));
@@ -598,6 +727,10 @@ function viewFolder(view) {
       `<b>${esc(g)}/</b> ← ${groups[g].length} file${groups[g].length === 1 ? '' : 's'}`).join(' · ');
   };
   $('#splitMode').onchange = () => { saved.mode = $('#splitMode').value; setSplit(); };
+  $('#addBatchRoute').onclick = () => {
+    S.folderGroups.push({ name: `Folder ${S.folderGroups.length + 1}`, count: 0 });
+    drawBatchRows(); drawSplitPreview();
+  };
   ['#splitRule', '#splitElse'].forEach((sel) => {
     $(sel).oninput = debounce(() => {
       const parts = $('#splitRule').value.split('→').map((x) => x.trim());

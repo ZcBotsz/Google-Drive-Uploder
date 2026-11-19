@@ -177,6 +177,69 @@ async def test_private_history_is_session_scoped(web):
     assert all("private-b" not in str(row) for row in rows)
 
 
+async def test_batch_folder_counts_assign_every_selected_file(web):
+    client = await login(web)
+    names = tuple((f"video-{i:02}.mp4", bytes([i]) * 4) for i in range(20))
+    job_id = await make_job(web, files=names)
+    items = await repo.items_of(web["db"], job_id)
+    groups = [("Folder 1", 1), ("Folder 2", 9), ("Folder 3", 5), ("Folder 4", 5)]
+    plan, cursor = {}, 0
+    for name, count in groups:
+        for item in items[cursor:cursor + count]:
+            plan[item["id"]] = [name]
+        cursor += count
+    bad = await client.patch(f"/api/jobs/{job_id}", json={"destination": {
+        "folder_id": "root", "path": "My Drive", "split": {
+            "mode": "batches", "groups": [{"name": n, "count": c} for n, c in groups[:-1]],
+            "plan": plan}}})
+    assert bad.status_code == 422
+    good = await client.patch(f"/api/jobs/{job_id}", json={"destination": {
+        "folder_id": "root", "path": "My Drive", "split": {
+            "mode": "batches", "groups": [{"name": n, "count": c} for n, c in groups],
+            "plan": plan}}})
+    assert good.status_code == 200, good.text
+    saved = good.json()["destination"]["split"]
+    assert saved["groups"] == [{"name": n, "count": c} for n, c in groups]
+    assert list(saved["plan"].values()).count(["Folder 1"]) == 1
+    assert list(saved["plan"].values()).count(["Folder 2"]) == 9
+    assert list(saved["plan"].values()).count(["Folder 3"]) == 5
+    assert list(saved["plan"].values()).count(["Folder 4"]) == 5
+    await repo.save_drive_account(web["db"], 55, email="batch@example.test",
+                                  enc_refresh=TokenCipher(web["cfg"].fernet_key()).enc("1//r"),
+                                  access="ya29.fake", expiry=9e12, scope="s", scope_mode="file")
+    drive = await web["accounts"].client(55)
+    saved_job = await repo.get_job(web["db"], job_id)
+    for item in items:
+        folder = await web["worker"]._folder_for(saved_job, item, drive)
+        expected = saved["plan"][item["id"]][0]
+        assert folder["path"].endswith(expected)
+
+
+async def test_active_job_poll_returns_fresh_progress_totals(web):
+    client = await login(web)
+    job_id = await make_job(web, files=(("poll.bin", b"a" * 100),))
+    item = (await repo.items_of(web["db"], job_id))[0]
+    await repo.update_job(web["db"], job_id, status="running")
+    await repo.set_item(web["db"], item["id"], state="uploading", bytes_done=42)
+    response = await client.get(f"/api/jobs/{job_id}")
+    assert response.status_code == 200
+    assert response.json()["totals"]["bytes_done"] == 42
+
+
+async def test_worker_checkpoint_publishes_live_progress_to_studio(web):
+    from driveup.core.progress import ProgressState
+    job_id = await make_job(web)
+    item = (await repo.items_of(web["db"], job_id))[0]
+    state = ProgressState(job_id=job_id, item_id=item["id"], name="video.mp4", total=200)
+    queue = web["worker"].hub.subscribe(job_id)
+    checkpoint = web["worker"]._checkpoint(item["id"], state.on_drive, {}, state)
+    await checkpoint(80, 200)
+    event = await queue.get()
+    assert event["stage"] == "uploading" and event["drive_pct"] == 40.0
+    assert (await repo.get_item(web["db"], item["id"]))["bytes_done"] == 80
+    web["worker"].hub.unsubscribe(job_id, queue)
+
+
 async def test_patch_updates_destination_and_names(web):
     c = await login(web)
     job_id = await make_job(web, files=(("x.mp4", b"a" * 10), ("y.mp4", b"b" * 10)))

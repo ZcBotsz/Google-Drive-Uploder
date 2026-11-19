@@ -35,6 +35,7 @@ from pathlib import Path
 from ..config import BRAND_NAME, settings as default_settings
 from ..core import naming as naming_mod
 from ..core.access import human_bytes, unlock_at_text
+from ..core.groups import safe_folder_name
 from ..db import repo
 from ..drive import auth as oauth
 from ..drive.client import FOLDER_MIME, folder_id_from_url
@@ -116,7 +117,11 @@ async def api_me(request: Request, user=Depends(session_user)):
               progress_style=glob.get("progress_style", "glow"),
               drive_connected=bool(acc) and not acc.get("needs_reconnect"),
               drive_email=(acc or {}).get("email", ""),
-              plan={"id": plan.get("id"), "name": plan.get("name")},
+              plan={"id": plan.get("id"), "name": plan.get("name"),
+                    "max_files_job": plan.get("max_files_job"),
+                    "max_file_mb": plan.get("max_file_mb"),
+                    "daily_gb": plan.get("daily_gb")},
+              usage_today=await repo.quota_used(st.db, user["user_id"]),
               job=job, blocked=blocked)
 
 
@@ -177,7 +182,7 @@ async def api_browser_upload(request: Request, files: List[UploadFile] = File(..
     """
     st = state_of(request)
     if not files or len(files) > 100:
-        return fail("file_count", "Choose between 1 and 100 files at a time.", 422)
+        return fail("file_count", "Send 1–100 files per batch. The Studio combines batches into one job.", 422)
     target_job = None
     if job_id:
         target_job = await owned_job(request, job_id, user)
@@ -277,6 +282,9 @@ async def api_job(request: Request, job_id: str, user=Depends(session_user)):
     job = await owned_job(request, job_id, user)
     if not job:
         return fail("not_found", "job not found", 404)
+    if job["status"] in ("queued", "running", "paused"):
+        job["totals"] = await repo.recompute_totals(st.db, job_id)
+        job = await repo.get_job(st.db, job_id)
     return ok(**await job_payload(st, job))
 
 
@@ -297,15 +305,44 @@ async def api_patch_job(request: Request, job_id: str, body: dict = Body(...),
         split = dest.get("split")
         if split:
             mode = str(split.get("mode") or "none").lower()
-            if mode not in ("none", "type", "season", "date", "custom"):
+            if mode not in ("none", "type", "season", "date", "custom", "batches"):
                 return fail("bad_split", "unknown split mode", 422)
+            route_plan = {k: v for k, v in (split.get("plan") or {}).items()} if split.get("plan") else {}
+            groups = []
+            if mode == "batches":
+                items = await repo.items_of(st.db, job_id)
+                allowed = {item["id"] for item in items}
+                raw_groups = split.get("groups") or []
+                seen_names = set()
+                for group in raw_groups[:20]:
+                    raw_name = str((group or {}).get("name") or "").strip()
+                    if not raw_name:
+                        return fail("bad_split", "Name every destination folder.", 422)
+                    name = safe_folder_name(raw_name, limit=80)
+                    if name.casefold() in seen_names:
+                        return fail("bad_split", "Each destination folder needs a unique name.", 422)
+                    seen_names.add(name.casefold())
+                    count = int((group or {}).get("count") or 0)
+                    if count < 1:
+                        return fail("bad_split", "Each folder group needs a positive file count.", 422)
+                    groups.append({"name": name, "count": count})
+                if not groups or sum(g["count"] for g in groups) != len(items):
+                    return fail("bad_split", "Folder counts must add up to every file in the job.", 422)
+                if set(route_plan) != allowed:
+                    return fail("bad_split", "Every job file needs exactly one folder assignment.", 422)
+                clean_plan = {}
+                for item_id, chain in route_plan.items():
+                    if not isinstance(chain, list) or len(chain) != 1:
+                        return fail("bad_split", "Each batch item must map to one child folder.", 422)
+                    clean_plan[item_id] = [safe_folder_name(str(chain[0]), limit=80)]
+                route_plan = clean_plan
             new_dest["split"] = {
                 "mode": mode,
                 "rules": [{k: str(v) for k, v in (r or {}).items()}
                           for r in (split.get("rules") or [])][:20],
                 "else": str(split.get("else") or "Other")[:120],
-                # a precomputed plan lets the worker skip re-deriving it
-                "plan": {k: v for k, v in (split.get("plan") or {}).items()} if split.get("plan") else {},
+                "plan": route_plan,
+                "groups": groups if mode == "batches" else [],
             }
         patch["destination"] = new_dest
     if "naming" in body:

@@ -574,7 +574,7 @@ class Worker:
                                  style=cfg.progress_style)
             await safe_edit(self.bot, chat_id, msg_id, text, gate=self.fg, pct=100, force=True)
 
-    def _checkpoint(self, item_id: str, raw, holder: dict):
+    def _checkpoint(self, item_id: str, raw, holder: dict, state: ProgressState | None = None):
         """Persist the resumable session URI + committed offset as it moves.
 
         Without this a restart has nothing to resume from — which is precisely
@@ -592,6 +592,8 @@ class Worker:
                                            "committed": int(done)})
             except Exception as e:                        # noqa: BLE001
                 log.debug("checkpoint failed: %s", e)
+            if state is not None:
+                self.hub.put(state)
         return cb
 
     # ── byte paths ───────────────────────────────────────────────────────
@@ -609,11 +611,14 @@ class Worker:
         path = Path(self.cfg.download_dir) / f"{item['id']}_{safe}"
         if path.exists() and path.stat().st_size == int(tg.get("size") or 0):
             return path
-        # the download half reports 100% of the card's "Telegram → Server" bar
+        # Publish every byte checkpoint to both Telegram animation and Studio SSE.
         state.stage = "downloading"
+        async def report(done: int, total: int) -> None:
+            state.on_tg(done, total)
+            self.hub.put(state)
         await tg_download.download_to_file(
             self.bot, tg["file_id"], path,
-            progress=state.on_tg, should_stop=state.want_stop, timeout=3600)
+            progress=report, should_stop=state.want_stop, timeout=3600)
         if state.want_stop():
             path.unlink(missing_ok=True)
             raise Cancelled()
@@ -654,7 +659,7 @@ class Worker:
         session = (item.get("drive") or {})
         holder = {"uri": session.get("session_uri", ""), "committed": 0}
         up = client.uploader(chunk=self.cfg.chunk_bytes,
-                             on_progress=self._checkpoint(item["id"], state.on_drive, holder),
+                             on_progress=self._checkpoint(item["id"], state.on_drive, holder, state),
                              should_cancel=state.want_stop)
         if holder["uri"]:
             up.session_uri = holder["uri"]
@@ -706,6 +711,7 @@ class Worker:
                         timeout=3600):
                     done += len(piece)
                     await _fire(state.on_tg, min(done, size or done), size or done)
+                    self.hub.put(state)
                     await _put(queue, piece)
                 await _put(queue, None)
             except BaseException as e:               # noqa: BLE001
@@ -726,7 +732,7 @@ class Worker:
         session = (item.get("drive") or {})
         holder = {"uri": session.get("session_uri", ""), "committed": 0}
         up = client.uploader(chunk=chunk,
-                             on_progress=self._checkpoint(item["id"], state.on_drive, holder),
+                             on_progress=self._checkpoint(item["id"], state.on_drive, holder, state),
                              should_cancel=state.want_stop)
         if holder["uri"]:
             up.session_uri = holder["uri"]

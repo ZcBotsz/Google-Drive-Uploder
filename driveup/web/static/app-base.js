@@ -24,7 +24,8 @@ const S = {
   step: 'files',
   files: [],
   folder: { id: 'root', path: 'My Drive' },
-  split: null,                       // {mode:'type'|'season'|'date'|'custom', …} or null
+  split: null,                       // auto split, or explicit per-file destination plan
+  folderGroups: [],                  // ordered name/count allocations in the folder step
   naming: { template: '{original}.{ext}', start: 1, step: 1, prefix: '', suffix: '',
             find: '', replace: '', regex: false, case: 'keep', strip_emoji: true,
             space: ' ', max_bytes: 255, ext_rule: 'keep', force_ext: '' },

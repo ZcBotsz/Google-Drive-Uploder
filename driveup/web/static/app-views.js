@@ -8,6 +8,21 @@ function currentSplit() {
   if (!sel) return S.split || null;
   const mode = sel.value;
   if (mode === 'none') return null;
+  if (mode === 'batches') {
+    const groups = (S.folderGroups || []).map((g) => ({
+      name: String(g.name || '').trim(), count: Number(g.count) || 0,
+    }));
+    const total = groups.reduce((sum, g) => sum + g.count, 0);
+    const uniqueNames = new Set(groups.map((g) => g.name.toLocaleLowerCase()));
+    if (!S.files.length || groups.some((g) => !g.name || g.count < 1)
+        || uniqueNames.size !== groups.length || total !== S.files.length) return null;
+    const plan = {}; let offset = 0;
+    for (const group of groups) {
+      for (const file of S.files.slice(offset, offset + group.count)) plan[file.id] = [group.name];
+      offset += group.count;
+    }
+    return { mode: 'batches', groups, plan, rules: [], else: 'Other' };
+  }
   const parts = ($('#splitRule') && $('#splitRule').value || '').split('→').map((x) => x.trim());
   return {
     mode,
@@ -271,12 +286,16 @@ async function viewReview(view) {
   const total = S.files.reduce((a, f) => a + f.size, 0);
   const speed = S.measuredSpeed || 0;
   const eta = speed > 0 ? total / speed : 0;
+  const batchSummary = S.split?.mode === 'batches'
+    ? (S.split.groups || []).map((g) => `${esc(g.name)} (${Number(g.count) || 0})`).join(' · ')
+    : '';
   const c = el('div', 'card');
   c.innerHTML = `
     <h2>Review</h2>
     <div class="kv"><span>Files</span><span>${S.files.length}</span></div>
     <div class="kv"><span>Total size</span><span>${humanBytes(total)}</span></div>
     <div class="kv"><span>Destination</span><span>${esc(S.folder.path)}</span></div>
+    ${batchSummary ? `<div class="kv"><span>Folder batches</span><span>${batchSummary}</span></div>` : ''}
     <div class="kv"><span>Naming</span><span class="mono">${esc(S.naming.template)}</span></div>
     <div class="kv"><span>Order</span><span>${esc(S.sequence.mode)}${S.sequence.strict ? ' · strict' : ''}</span></div>
     <div class="kv"><span>Conflicts</span><span>${esc(S.conflict)}</span></div>
@@ -323,7 +342,6 @@ async function startUpload() {
     if (res.preset_saved) toast('Preset saved', 'ok');
     S.startedAt = Date.now();
     go('live');
-    attachSSE();
   } catch (e) {
     toast(e.message, 'err');
     if (btn) { btn.disabled = false; btn.textContent = '🚀 Start upload'; }
