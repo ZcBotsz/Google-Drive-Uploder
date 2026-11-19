@@ -180,6 +180,16 @@ def create_app(*, db, cfg: Settings, bot, worker, accounts, access, hub=None,
         body = home.read_text(encoding="utf-8").replace("{{BOT_LINK}}", "/studio")
         return HTMLResponse(body, status_code=200)
 
+    @app.get("/privacy", response_class=HTMLResponse)
+    async def privacy_policy():
+        """Public policy for the OAuth consent screen, no session required."""
+        return HTMLResponse((STATIC / "privacy.html").read_text(encoding="utf-8"))
+
+    @app.get("/terms", response_class=HTMLResponse)
+    async def terms_of_service():
+        """Public terms for the OAuth consent screen, no session required."""
+        return HTMLResponse((STATIC / "terms.html").read_text(encoding="utf-8"))
+
     @app.get("/studio", response_class=HTMLResponse)
     async def studio(request: Request):
         """Private transfer workspace. Bot-signed links land here after redemption."""
@@ -198,7 +208,7 @@ def create_app(*, db, cfg: Settings, bot, worker, accounts, access, hub=None,
               <p>Sign in with Google to connect your Drive and open the Studio. You can use the website directly; Telegram is optional.</p>
               <p><a class="btn primary" href="/auth/google/login">Continue with Google Drive</a></p>
               <p class="hint">Your workspace is tied to your sign-in. Other regular users cannot access your jobs or files; authorized admin roles retain service tools. Google Drive quota and service limits apply.</p>
-              <p><a href="/home">About ZC Drive Upload</a></p>
+              <p><a href="/home">About ZC Drive Upload</a> · <a href="/privacy">Privacy Policy</a> · <a href="/terms">Terms of Service</a></p>
             </div></div></body></html>"""
             return HTMLResponse(html_body, status_code=200)
         return HTMLResponse((STATIC / "index.html").read_text(encoding="utf-8"))

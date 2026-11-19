@@ -736,3 +736,21 @@ async def test_dashboard_stats_are_session_scoped(web):
     assert response.json()["upload_stats"]["files"] == 1
     assert response.json()["upload_stats"]["bytes"] == 4
     assert "other.bin" not in response.text
+
+
+async def test_oauth_public_information_pages_no_session(web):
+    client = web['client']
+    for path, heading in [('/home', 'ZC Drive Upload'), ('/privacy', 'Privacy Policy'), ('/terms', 'Terms of Service')]:
+        response = await client.get(path)
+        assert response.status_code == 200
+        assert heading.lower() in response.text.lower()
+        assert '<html' in response.text.lower()
+        assert '@ZCQXx' in response.text
+    home = (await client.get('/home')).text
+    assert 'href="/privacy"' in home and 'href="/terms"' in home
+    privacy = (await client.get('/privacy')).text
+    assert 'Google API Services User Data Policy' in privacy
+    assert 'dump channel' in privacy.lower() and 'retention' in privacy.lower()
+    studio = (await client.get('/studio')).text
+    assert 'href="/privacy"' in studio and 'href="/terms"' in studio
+    assert (await client.get('/api/me')).status_code == 401
