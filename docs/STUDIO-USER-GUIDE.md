@@ -123,3 +123,30 @@ see its dashboard and reconnect Google Drive from there.
 
 The downloadable project does not change your live site. Deploy the updated
 files to your existing service before expecting the new dashboard to appear.
+
+### Channel connection troubleshooting
+
+At **Channel automation → Set channel ID**, you can send the numeric ID or
+forward an original post from your channel to the bot. Forwarding requires that
+the channel permits forwarding. The bot displays the ID it linked: confirm that
+it is the intended channel. An ID or forwarded post alone never proves ownership;
+the bot still verifies that both you and the exact bot receiving the message are
+channel administrators. If forwarding is restricted, use the numeric ID instead.
+
+If Telegram cannot find/access the channel, check the `-100...` ID (not the
+linked discussion group) and confirm the bot named in the message is listed under
+that channel's administrators. If your account is reported as not an admin, use
+the Telegram account listed as creator or administrator. A transient Telegram or
+network error is reported separately; retry later. Service owners should also
+verify the running bot instance and its configured Telegram API endpoint without
+sharing bot tokens. No bypass is provided for failed verification. If Telegram
+cannot verify permissions, nothing is connected or collected on that basis.
+
+Some older self-hosted Telegram Bot API servers return administrator objects
+without fields required by newer aiogram versions. Channel verification retries
+those particular responses through the same configured Bot API endpoint using a
+minimal response parser. It still requires a successful Bot API response, the
+expected channel/user IDs, and explicit creator or administrator statuses for
+both parties; it does not infer privileges from a missing field. An incompatible
+or failed response is rejected. This also applies when verifying subsequent
+channel posts. Updating the local Telegram Bot API service remains recommended.

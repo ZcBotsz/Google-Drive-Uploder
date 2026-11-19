@@ -10,8 +10,10 @@ from aiogram.filters import BaseFilter
 
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNetworkError, TelegramRetryAfter, TelegramServerError, TelegramNotFound
+from aiogram.exceptions import (ClientDecodeError, TelegramBadRequest, TelegramForbiddenError,
+                                TelegramNetworkError, TelegramRetryAfter, TelegramServerError, TelegramNotFound)
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.methods.base import TelegramMethod
 
 from ...config import effective_max_file_mb
 from ...core import naming as naming_mod
@@ -266,6 +268,50 @@ async def channel_status(msg: Message, **data):
         return await msg.answer(f"📥 {state}: {len(items)} files. Rejected posts: {count} (latest 10 shown).{details}{verification}\nUpload does not start automatically.", reply_markup=_keyboard(app, row["job_id"], user_id=owner_id, can_finish=row["state"] == "open"))
 
 
+class _RawGetChat(TelegramMethod[dict]):
+    """Ask the same authenticated Bot API endpoint for an unmodelled result."""
+    __returning__ = dict
+    __api_method__ = "getChat"
+    chat_id: int
+
+
+class _RawGetChatMember(TelegramMethod[dict]):
+    __returning__ = dict
+    __api_method__ = "getChatMember"
+    chat_id: int
+    user_id: int
+
+
+async def _verified_chat_type(bot, channel_id: int) -> str:
+    try:
+        chat = await bot.get_chat(channel_id)
+        return chat.type
+    except ClientDecodeError:
+        # Re-request through aiogram's session so HTTP status and the Bot API
+        # ok flag are still enforced; do not trust the failed decoder payload.
+        result = await bot(_RawGetChat(chat_id=channel_id))
+        if (isinstance(result, dict) and type(result.get("id")) is int
+                and result["id"] == channel_id
+                and result.get("type") in ("channel", "private", "group", "supergroup")):
+            log.info("Channel lookup used compatible Bot API response fields")
+            return result["type"]
+        raise ValueError("incompatible channel response")
+
+
+async def _verified_member_status(bot, channel_id: int, user_id: int) -> str:
+    try:
+        return (await bot.get_chat_member(channel_id, user_id)).status
+    except ClientDecodeError:
+        result = await bot(_RawGetChatMember(chat_id=channel_id, user_id=user_id))
+        member = result.get("user") if isinstance(result, dict) else None
+        status = result.get("status") if isinstance(result, dict) else None
+        if (isinstance(member, dict) and type(member.get("id")) is int and member["id"] == user_id
+                and status in ("creator", "administrator", "member", "restricted", "left", "kicked")):
+            log.info("Channel membership used compatible Bot API response fields")
+            return status
+        raise ValueError("incompatible membership response")
+
+
 async def _channel_admin_check(app, channel_id: str, user_id: int) -> tuple[bool, str]:
     """Ask Telegram about both accounts; explain failures without bypassing checks."""
     try:
@@ -277,37 +323,43 @@ async def _channel_admin_check(app, channel_id: str, user_id: int) -> tuple[bool
         log.warning("Channel setup: bot identity lookup failed")
         return False, "The service could not identify the bot. Contact the service administrator."
     try:
-        chat = await app.bot.get_chat(int(channel_id))
+        chat_type = await _verified_chat_type(app.bot, int(channel_id))
     except (TelegramNetworkError, TelegramServerError, TelegramRetryAfter, asyncio.TimeoutError):
         return False, "Telegram is temporarily unavailable while checking the channel. Try again shortly."
     except (TelegramBadRequest, TelegramForbiddenError, TelegramNotFound):
         return False, f"Telegram cannot find or access this channel for {esc(bot_name)}. Check the numeric channel ID and confirm that exact bot is an administrator of the channel, then try again."
-    except Exception:
-        log.warning("Channel setup: channel lookup failed")
+    except (ClientDecodeError, ValueError):
+        return False, "The Telegram API returned an incompatible channel response. The service administrator should update the local Bot API server or check its configuration."
+    except Exception as error:
+        log.warning("Channel setup: channel lookup failed (%s)", type(error).__name__)
         return False, "The service could not check the channel. Contact the service administrator."
-    if chat.type != "channel":
+    if chat_type != "channel":
         return False, "This ID is not a Telegram channel. Use the channel ID, not the linked discussion group ID."
     try:
-        bot_member = await app.bot.get_chat_member(int(channel_id), me.id)
+        bot_status = await _verified_member_status(app.bot, int(channel_id), me.id)
     except (TelegramNetworkError, TelegramServerError, TelegramRetryAfter, asyncio.TimeoutError):
         return False, "Telegram is temporarily unavailable while checking the bot's membership. Try again shortly."
     except (TelegramBadRequest, TelegramForbiddenError, TelegramNotFound):
         return False, f"Telegram could not check {esc(bot_name)} in this channel. Confirm that exact bot is a channel administrator and try again."
-    except Exception:
-        log.warning("Channel setup: bot membership lookup failed")
+    except (ClientDecodeError, ValueError):
+        return False, "The Telegram API returned an incompatible bot membership response. The service administrator should update the local Bot API server or check its configuration."
+    except Exception as error:
+        log.warning("Channel setup: bot membership lookup failed (%s)", type(error).__name__)
         return False, "The service could not check the bot's channel membership. Contact the service administrator."
-    if bot_member.status not in ("administrator", "creator"):
+    if bot_status not in ("administrator", "creator"):
         return False, f"Telegram reports {esc(bot_name)} is not a channel administrator. Promote that exact bot, then retry."
     try:
-        member = await app.bot.get_chat_member(int(channel_id), user_id)
+        member_status = await _verified_member_status(app.bot, int(channel_id), user_id)
     except (TelegramNetworkError, TelegramServerError, TelegramRetryAfter, asyncio.TimeoutError):
         return False, "Telegram is temporarily unavailable while checking your membership. Try again shortly."
     except (TelegramBadRequest, TelegramForbiddenError, TelegramNotFound):
         return False, "Telegram could not check your channel membership. Use the Telegram account that administers the channel and try again."
-    except Exception:
-        log.warning("Channel setup: user membership lookup failed")
+    except (ClientDecodeError, ValueError):
+        return False, "The Telegram API returned an incompatible user membership response. The service administrator should update the local Bot API server or check its configuration."
+    except Exception as error:
+        log.warning("Channel setup: user membership lookup failed (%s)", type(error).__name__)
         return False, "The service could not check your channel membership. Contact the service administrator."
-    if member.status not in ("administrator", "creator"):
+    if member_status not in ("administrator", "creator"):
         return False, "Telegram reports your current account is not an administrator of this channel. Use the account listed in the channel's Administrators, then retry."
     return True, ""
 
