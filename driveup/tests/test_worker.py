@@ -424,3 +424,35 @@ async def test_successful_upload_is_logged_and_mirrored_to_configured_channels(e
                for m in bot.sent)
     assert any(m["chat_id"] == "-100222" and "Drive upload complete" in m["text"]
                for m in bot.sent)
+
+@pytest.mark.asyncio
+async def test_manual_tree_end_to_end_creates_empty_and_nested_folders(env):
+    job_id = await make_job(env, [('root.bin', b'a'*100), ('child.bin', b'b'*100), ('nested.bin', b'c'*100)], template='{original}.{ext}')
+    db, worker = env['db'], env['worker']
+    items = await repo.items_of(db, job_id)
+    split = {'mode': 'tree', 'folders': [['Course'], ['Course', 'Module'], ['Empty']],
+             'plan': {items[0]['id']: [], items[1]['id']: ['Course'], items[2]['id']: ['Course', 'Module']}}
+    await repo.update_job(db, job_id, destination={'folder_id':'root', 'path':'My Drive', 'split':split}, status='queued')
+    worker.spawn(job_id)
+    job = await wait_done(worker, job_id, db)
+    assert job['status'] == 'done'
+    assert all(item['state'] == 'done' for item in await repo.items_of(db, job_id))
+    files = {f['name']: f for f in env['fd'].files.values()}
+    assert files['Course']['parents'] == ['root']
+    assert files['Module']['parents'] == [files['Course']['id']]
+    assert files['Empty']['parents'] == ['root']
+    assert files['root.bin']['parents'] == ['root']
+    assert files['child.bin']['parents'] == [files['Course']['id']]
+    assert files['nested.bin']['parents'] == [files['Module']['id']]
+
+@pytest.mark.asyncio
+async def test_manual_tree_same_names_different_folders_not_skipped(env):
+    job_id = await make_job(env, [('same.bin', b'a'*100), ('same.bin', b'b'*100)], template='{original}.{ext}', policy='skip')
+    db, worker = env['db'], env['worker']
+    items = await repo.items_of(db, job_id)
+    split = {'mode':'tree', 'folders':[['A'], ['B']], 'plan':{items[0]['id']:['A'], items[1]['id']:['B']}}
+    await repo.update_job(db, job_id, destination={'folder_id':'root','split':split}, status='queued')
+    worker.spawn(job_id)
+    await wait_done(worker, job_id, db)
+    assert [i['state'] for i in await repo.items_of(db,job_id)] == ['done','done']
+    assert len([f for f in env['fd'].files.values() if f['name'] == 'same.bin']) == 2

@@ -754,3 +754,68 @@ async def test_oauth_public_information_pages_no_session(web):
     studio = (await client.get('/studio')).text
     assert 'href="/privacy"' in studio and 'href="/terms"' in studio
     assert (await client.get('/api/me')).status_code == 401
+
+async def test_selected_folder_routes_are_arbitrary_validated_and_owned(web):
+    client = await login(web)
+    job_id = await make_job(web, files=tuple((f"file-{i}.bin", b'x') for i in range(7)))
+    await repo.save_drive_account(web["db"], 55, email="routes@example.test",
+        enc_refresh=TokenCipher(web["cfg"].fernet_key()).enc("1//r"),
+        access="ya29.fake", expiry=9e12, scope="s", scope_mode="file")
+    items = await repo.items_of(web["db"], job_id)
+    a = web['fd'].add_folder('First')
+    b = web['fd'].add_folder('Second')
+    plan = {item['id']: a if i in (1, 5) else b for i, item in enumerate(items)}
+    async def patch(mapping):
+        return await client.patch(f'/api/jobs/{job_id}', json={'destination': {
+            'id': 'root', 'split': {'mode': 'selected', 'plan': mapping}}})
+    assert (await patch(dict(list(plan.items())[:-1]))).status_code == 422
+    assert (await patch({**plan, 'foreign-item': a})).status_code == 422
+    assert (await patch({**plan, items[0]['id']: 'unknown'})).status_code == 422
+    web['fd'].files[a]['capabilities'] = {'canAddChildren': False}
+    assert (await patch(plan)).status_code == 422
+    web['fd'].files[a]['capabilities'] = {'canAddChildren': True}
+    response = await patch(plan)
+    assert response.status_code == 200, response.text
+    split = response.json()['destination']['split']
+    assert split['plan'] == plan
+    assert split['destinations'] == {a: 'First', b: 'Second'}
+    saved_job = await repo.get_job(web['db'], job_id)
+    drive = await web['accounts'].client(55)
+    for item in items:
+        target = await web['worker']._folder_for(saved_job, item, drive)
+        assert target['folder_id'] == plan[item['id']]
+    await login(web, 56)
+    assert (await patch(plan)).status_code == 404
+
+async def test_manual_tree_routes_validation_and_worker(web):
+    client = await login(web)
+    job_id = await make_job(web, files=tuple((f'file-{i}.bin', b'x') for i in range(4)))
+    await repo.save_drive_account(web['db'], 55, email='tree@example.test',
+        enc_refresh=TokenCipher(web['cfg'].fernet_key()).enc('1//r'),
+        access='ya29.fake', expiry=9e12, scope='s', scope_mode='file')
+    items = await repo.items_of(web['db'], job_id)
+    folders = [['Course'], ['Course', 'Module'], ['Empty']]
+    plan = {items[0]['id']: [], items[1]['id']: ['Course'],
+            items[2]['id']: ['Course', 'Module'], items[3]['id']: ['Course', 'Module']}
+    async def patch(folder_list, routes, parent='root'):
+        return await client.patch(f'/api/jobs/{job_id}', json={'destination': {
+            'id': parent, 'path': 'My Drive', 'split': {'mode': 'tree', 'folders': folder_list, 'plan': routes}}})
+    assert (await patch(folders, {**plan, 'other-user-file': []})).status_code == 422
+    assert (await patch(folders[1:], plan)).status_code == 422
+    assert (await patch(folders + [['bad/name']], plan)).status_code == 422
+    assert (await patch(folders, {**plan, items[0]['id']: ['Missing']})).status_code == 422
+    assert (await patch(folders, plan, 'missing-parent')).status_code == 422
+    response = await patch(folders, plan)
+    assert response.status_code == 200, response.text
+    saved = response.json()['destination']['split']
+    assert saved['plan'] == plan and sorted(saved['folders']) == sorted(folders)
+    job = await repo.get_job(web['db'], job_id)
+    drive = await web['accounts'].client(55)
+    root = await web['worker']._folder_for(job, items[0], drive)
+    one = await web['worker']._folder_for(job, items[1], drive)
+    nested = await web['worker']._folder_for(job, items[2], drive)
+    assert root['folder_id'] == 'root'
+    assert web['fd'].files[nested['folder_id']]['parents'] == [one['folder_id']]
+    assert (await web['worker']._folder_for(job, items[3], drive))['folder_id'] == nested['folder_id']
+    await login(web, 56)
+    assert (await patch(folders, plan)).status_code == 404

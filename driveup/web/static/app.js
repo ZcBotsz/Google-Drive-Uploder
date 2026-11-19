@@ -8,10 +8,12 @@ function startNewTransfer(files) {
   S.selected = 'root';
   S.split = null;
   S.folderGroups = [];
+  S.fileRoutes = {};
+  S.manualFolders = [];
+  S.manualRoutes = {};
   S.step = 'files';
   history.replaceState(null, '', '/studio');
   render();
-  if (S.me?.drive_connected && !S.tree.root) loadTree('root');
   if (files?.length) {
     uploadBrowserFiles(files, $('#browserIntakeStatus'), $('#browserPick'), $('#browserIntakeProgress'));
   }

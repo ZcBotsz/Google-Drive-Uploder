@@ -120,7 +120,7 @@ class DriveClient:
 
     async def get(self, file_id: str) -> dict:
         return await self._call("GET", f"{self.API}/files/{file_id}", params={
-            "fields": FIELDS_FILE, "supportsAllDrives": "true"})
+            "fields": FIELDS_FILE + ",trashed,capabilities(canAddChildren)", "supportsAllDrives": "true"})
 
     async def path_of(self, file_id: str, depth: int = 8) -> tuple[str, str]:
         """`My Drive › Courses › Module 1` + the id path (root last)."""

@@ -55,7 +55,7 @@ async function boot() {
     if (S.me.progress_style) document.documentElement.dataset.bar = S.me.progress_style;
     // A disconnected account can still use its dashboard. Do not turn a
     // failed folder lookup into a full-screen blocker during Studio startup.
-    if (!S.dashboard && S.me.drive_connected) await loadTree(S.folder.id);
+    // Folder navigation loads on demand; don't delay Studio startup.
     if (jobId && !S.me.job) {
       S.jobId = '';
       S.dashboard = true;
@@ -91,6 +91,11 @@ function hydrate(job) {
     S.folder = { id: job.destination.folder_id, path: job.destination.path || 'My Drive' };
     S.split = (job.destination && job.destination.split) || null;
     S.folderGroups = (S.split && S.split.groups) || [];
+    S.fileRoutes = {};
+    S.manualFolders = S.split?.mode === 'tree' ? (S.split.folders || []).map(p => [...p]) : [];
+    S.manualRoutes = S.split?.mode === 'tree' ? {...S.split.plan} : {};
+    if (S.split?.mode === 'selected') for (const [id, folder] of Object.entries(S.split.plan || {}))
+      S.fileRoutes[id] = {id: folder, name: S.split.destinations?.[folder] || folder};
     S.selected = job.destination.folder_id;
   }
   if (job.naming) Object.assign(S.naming, job.naming);
@@ -233,10 +238,15 @@ function renderBottom() {
     bar.appendChild(n);
   } else if (S.step === 'folder') {
     const n = el('button', 'btn primary', 'Next: naming ›');
-    n.onclick = () => {
-      if ($('#splitMode')?.value === 'batches') {
+    n.onclick = async () => {
+      if (['batches', 'selected', 'tree'].includes($('#splitMode')?.value)) {
         const split = currentSplit();
-        if (!split) return toast(`Use unique folder names, positive counts, and assign exactly ${S.files.length} files.`, 'err');
+        if (!split) return toast($('#splitMode').value === 'selected' ? 'Assign every file to a folder before continuing.' : `Use unique folder names, positive counts, and assign exactly ${S.files.length} files.`, 'err');
+        if (split.mode === 'tree') {
+          n.disabled = true;
+          try { await api(`/api/jobs/${S.jobId}`, {method:'PATCH', body:{destination:{...S.folder,split}}}); }
+          catch (e) { n.disabled = false; return toast(e.message, 'err'); }
+        }
         S.split = split;
       } else S.split = currentSplit();
       go('naming');
@@ -468,21 +478,10 @@ function viewFiles(view) {
 }
 
 // ── step 2: folder picker ───────────────────────────────────────────────────
-async function loadTree(folderId = 'root') {
-  const box = $('#tree');
-  if (box) box.innerHTML = '<div class="skel-row skeleton"></div><div class="skel-row skeleton"></div>';
-  try {
-    const data = await api(`/api/drive/children?parent=${encodeURIComponent(folderId)}`);
-    S.tree[folderId] = data.folders;
-    S.driveAbout = data.about || S.driveAbout;
-    return data.folders;
-  } catch (e) {
-    if (e.message.includes('not connected')) showBlocker({
-      kind: 'locked', title: 'Google Drive not connected',
-      message: 'Your Google Drive connection is missing. Sign in again to connect your Drive directly on this website.',
-    });
-    return [];
-  }
+async function loadTree(folderId = 'root', page = '') {
+  const data = await api(`/api/drive/children?parent=${encodeURIComponent(folderId)}&page=${encodeURIComponent(page)}`);
+  if (!page) S.tree[folderId] = data.folders;
+  return data;
 }
 
 function viewFolder(view) {
@@ -507,7 +506,7 @@ function viewFolder(view) {
           <button class="btn sm" id="rootBtn">⌂ My Drive</button>
           <button class="btn sm" id="copyId">⧉ Copy folder ID</button>
         </div>
-        <div class="hint" id="folderHint">Tap a folder to select it. Tap ▸ to open its children.</div>
+        <div class="hint" id="folderHint">Tap a folder to select it, or Open to browse inside.</div>
       </div>
     </div>
     <div class="divider"></div>
@@ -522,6 +521,8 @@ function viewFolder(view) {
         <option value="date">By month — 2026-11</option>
         <option value="custom">By my own rule</option>
         <option value="batches">By folder counts (manual)</option>
+        <option value="selected">Choose files for each folder</option>
+        <option value="tree">Build a manual folder tree</option>
       </select>
       <input type="text" id="splitRule" placeholder="Rule: match text → folder name"
              style="flex:1;display:none">
@@ -534,113 +535,94 @@ function viewFolder(view) {
       <button type="button" class="btn sm" id="addBatchRoute">＋ Add folder group</button>
       <p class="hint" id="batchRouteSummary" role="status"></p>
     </div>
+    <div id="selectedRoutes" class="selected-routes" hidden>
+      <h3>Choose files and assign a folder</h3>
+      <p class="hint">Select files below, navigate to a folder above, then assign them. Repeat for other folders. Create a folder above if needed.</p>
+      <div class="route-toolbar"><input type="search" id="routeSearch" placeholder="Filter file names" aria-label="Filter file names"><button type="button" class="btn" id="routeAll">Select visible</button><button type="button" class="btn" id="routeClear">Clear selection</button><button type="button" class="btn primary" id="routeAssign">Assign selected to this folder</button></div>
+      <p id="routeStatus" role="status" aria-live="polite"></p>
+      <div id="routeFiles" class="route-files"></div>
+    </div>
+    <section id="manualTree" class="manual-tree" hidden>
+      <h3>Build your folder tree</h3>
+      <p class="hint">Everything starts in the selected parent folder. Choose a folder below, add subfolders, and move selected files into it. Folders are created in Drive only after you start. Existing folders with matching names may be reused.</p>
+      <div class="manual-layout"><div><div class="manual-actions"><button type="button" class="btn" id="manualAdd">＋ Folder</button><button type="button" class="btn" id="manualRename">Rename</button><select id="manualFolderTarget" aria-label="Move selected folder into"></select><button type="button" class="btn" id="manualMoveFolder">Move folder into…</button><button type="button" class="btn" id="manualDelete">Delete empty folder</button></div><div id="manualFolderList" class="manual-folders" aria-label="Folder tree"></div></div>
+      <div><div class="route-toolbar"><input type="search" id="manualSearch" placeholder="Filter files" aria-label="Filter files"><button type="button" class="btn" id="manualAll">Select visible</button><button type="button" class="btn" id="manualClear">Clear</button><button type="button" class="btn primary" id="manualAssign">Move selected here</button></div><p id="manualStatus" role="status" aria-live="polite"></p><div id="manualFileList" class="route-files"></div></div></div>
+      <div class="manual-actions"><button type="button" class="btn" id="manualSave">Save tree draft</button><span class="hint">Save before leaving or refreshing this page.</span></div>
+    </section>
     <p class="hint" id="splitPreview"></p>`;
   view.appendChild(card);
 
-  const renderTree = () => {
-    const tree = $('#tree');
+  // A single-folder browser avoids rebuilding an entire nested tree on each tap.
+  let browseId = S.selected || 'root', browseName = S.folder.path || 'My Drive';
+  let generation = 0, nextPage = '', currentFolders = [];
+  const tree = $('#tree');
+  const showFolder = (id, name) => {
+    S.selected = id; S.folder = {id, path: name};
+    $('#crumbs').textContent = name;
+    $('#folderHint').textContent = `Selected destination: ${name}`;
+    if ($('#routeAssign')) $('#routeAssign').textContent = `Assign selected to ${name}`;
+    tree.querySelectorAll('[data-folder-id]').forEach(x => x.classList.toggle('selected', x.dataset.folderId === id));
+  };
+  const drawFolders = () => {
     tree.innerHTML = '';
-    const root = el('div', 'tree-node' + (S.selected === 'root' ? ' selected' : '') + ' open');
-    root.dataset.id = 'root';
-    root.innerHTML = `<div class="nrow"><span class="caret">▸</span>⌂ <b>My Drive</b></div>
-      <div class="tree-children"><div id="rootKids"></div></div>`;
-    tree.appendChild(root);
-    root.querySelector('.nrow').onclick = (ev) => {
-      if (ev.target.classList.contains('caret')) { root.classList.toggle('open'); return; }
-      selectFolder('root', 'My Drive');
-    };
-    const kids = $('#rootKids', root);
-    (S.tree.root || []).forEach((f) => kids.appendChild(node(f)));
-  };
-
-  const node = (f, depth = 0) => {
-    const n = el('div', 'tree-node' + (S.selected === f.id ? ' selected' : ''));
-    n.dataset.id = f.id;
-    n.dataset.name = f.name;
-    n.innerHTML = `<div class="nrow"><span class="caret">▸</span>📁 ${esc(f.name)}</div>
-      <div class="tree-children"><div></div></div>`;
-    let loaded = false;
-    const row = n.querySelector('.nrow');
-    const caret = n.querySelector('.caret');
-    caret.onclick = async (ev) => {
-      ev.stopPropagation();
-      const open = n.classList.toggle('open');
-      if (open && !loaded) {
-        loaded = true;
-        const holder = n.querySelector('.tree-children > div');
-        holder.innerHTML = '<div class="skel-row skeleton" style="height:26px"></div>';
-        const kids = await loadTree(f.id);
-        holder.innerHTML = '';
-        if (!kids.length) holder.innerHTML = '<div class="hint" style="padding:6px 8px">empty</div>';
-        kids.forEach((k) => holder.appendChild(node(k, depth + 1)));
-      }
-    };
-    row.onclick = () => selectFolder(f.id, f.name);
-    return n;
-  };
-
-  const selectFolder = (id, name) => {
-    S.selected = id;
-    S.folder = { id, path: name };
-    if (S.split && S.split.mode && S.split.mode !== 'none') S.split = currentSplit();
-    $$('.tree-node').forEach((n) => n.classList.toggle('selected', n.dataset.id === id));
-    const crumb = $('#crumbs');
-    if (crumb) crumb.innerHTML = `<b>My Drive</b> <span class="sep">›</span> <b>${esc(name)}</b>`;
-    const hint = $('#folderHint');
-    if (hint) hint.textContent = `Selected: ${name}`;
-    const chip = $('.badge-num.pop');
-    if (chip) chip.classList.remove('pop');
-  };
-
-  renderTree();
-  // Dashboard-first sessions load the Drive tree lazily. If the user reaches
-  // this step before the background lookup finishes, refresh the visible tree.
-  if (!Array.isArray(S.tree.root) && S.me?.drive_connected) {
-    loadTree('root').then(() => {
-      if (S.step === 'folder' && $('#tree')) renderTree();
+    if (!currentFolders.length) tree.appendChild(el('p', 'hint', 'No folders here. Create one or go back.'));
+    currentFolders.forEach(f => {
+      const row = el('div', 'folder-browser-row' + (S.selected === f.id ? ' selected' : ''));
+      row.dataset.folderId = f.id;
+      const choose = document.createElement('button'); choose.type = 'button'; choose.className = 'folder-pick';
+      choose.textContent = '📁 ' + f.name; choose.onclick = () => showFolder(f.id, f.name);
+      const open = document.createElement('button'); open.type = 'button'; open.className = 'btn folder-open';
+      open.textContent = 'Open ›'; open.setAttribute('aria-label', 'Open ' + f.name);
+      open.onclick = () => { showFolder(f.id, f.name); browse(f.id, f.name); };
+      row.append(choose, open); tree.appendChild(row);
     });
-  }
-
-  $('#dsearch').oninput = debounce(async (ev) => {
-    const q = ev.target.value.trim();
-    const tree = $('#tree');
-    if (!q) { renderTree(); return; }
-    tree.innerHTML = '<div class="skel-row skeleton"></div>';
+    if (nextPage) {
+      const more = el('button', 'btn folder-more', 'Load more folders');
+      more.onclick = () => browse(browseId, browseName, nextPage); tree.appendChild(more);
+    }
+  };
+  const browse = async (id, name, page = '') => {
+    const token = ++generation;
+    if (!page) { browseId = id; browseName = name; tree.innerHTML = '<p class="hint">Loading folders…</p>'; }
+    try {
+      const data = await loadTree(id, page);
+      if (token !== generation || !tree.isConnected) return;
+      currentFolders = page ? currentFolders.concat(data.folders) : data.folders;
+      nextPage = data.next || ''; drawFolders();
+    } catch (e) {
+      if (token !== generation || !tree.isConnected) return;
+      tree.textContent = 'Could not load folders: ' + e.message;
+      const retry = el('button', 'btn', 'Retry'); retry.onclick = () => browse(id, name, page); tree.appendChild(retry);
+    }
+  };
+  showFolder(S.selected || 'root', S.folder.path || 'My Drive');
+  browse(S.selected || 'root', S.folder.path || 'My Drive');
+  const searchFolders = debounce(async (q, token) => {
+    if (!q) { browse(browseId, browseName); return; }
+    tree.textContent = 'Searching…';
     try {
       const res = await api(`/api/drive/search?q=${encodeURIComponent(q)}`);
-      tree.innerHTML = '';
-      if (!res.folders.length) {
-        tree.innerHTML = '<p class="hint" style="padding:10px">No folder matches.</p>';
-      }
-      res.folders.forEach((f) => tree.appendChild(node(f)));
-    } catch (e) { toast(e.message, 'err'); }
+      if (token !== generation || !tree.isConnected || $('#dsearch').value.trim() !== q) return;
+      currentFolders = res.folders; nextPage = ''; drawFolders();
+    } catch (e) { if (token === generation && tree.isConnected) tree.textContent = 'Search failed: ' + e.message; }
   }, 320);
-
+  $('#dsearch').oninput = (ev) => { const token = ++generation; searchFolders(ev.target.value.trim(), token); };
   $('#newFolderBtn').onclick = async () => {
-    const name = prompt('New folder name');
-    if (!name) return;
+    const name = prompt('New folder name inside ' + S.folder.path);
+    if (!name || !name.trim()) return;
+    const parent = S.selected;
     try {
-      const res = await api('/api/drive/folders', { method: 'POST',
-        body: { name, parent: S.selected } });
-      toast(`Created “${res.name}”`, 'ok');
-      S.selected = res.id;
-      S.folder = { id: res.id, path: res.name };
-      S.tree[S.folder.id] = null;
-      S.tree.root = await loadTree('root');
-      renderTree();
-      selectFolder(res.id, res.name);
+      const res = await api('/api/drive/folders', {method:'POST', body:{name:name.trim(), parent}});
+      toast(`Created “${res.name}”`, 'ok'); showFolder(res.id, res.name); $('#dsearch').value = ''; browse(res.id, res.name);
     } catch (e) { toast(e.message, 'err'); }
   };
-
   $('#upBtn').onclick = async () => {
     try {
-      const res = await api(`/api/drive/parent?child=${encodeURIComponent(S.selected)}`);
-      S.selected = res.id; S.folder = { id: res.id, path: res.name };
-      S.tree[res.id] = S.tree[res.id] || await loadTree(res.id);
-      renderTree();
+      const res = await api(`/api/drive/parent?child=${encodeURIComponent(browseId)}`);
+      $('#dsearch').value = ''; showFolder(res.id, res.name); browse(res.id, res.name);
     } catch (e) { toast(e.message, 'err'); }
   };
-  $('#rootBtn').onclick = () => { S.selected = 'root'; S.folder = { id: 'root', path: 'My Drive' }; renderTree(); };
+  $('#rootBtn').onclick = () => { $('#dsearch').value = ''; showFolder('root', 'My Drive'); browse('root', 'My Drive'); };
   $('#copyId').onclick = async () => {
     try { await navigator.clipboard.writeText(S.selected); toast('Folder id copied', 'ok'); }
     catch (_) { toast(S.selected); }
@@ -686,6 +668,10 @@ function viewFolder(view) {
     $('#splitRule').style.display = custom ? '' : 'none';
     $('#splitElse').style.display = custom ? '' : 'none';
     $('#batchRoutePanel').style.display = batches ? '' : 'none';
+    $('#selectedRoutes').hidden = saved.mode !== 'selected';
+    $('#manualTree').hidden = saved.mode !== 'tree';
+    if (saved.mode === 'tree') drawManual();
+    if (saved.mode === 'selected') drawRouteFiles();
     if (custom) {
       const r0 = (saved.rules || [])[0] || {};
       $('#splitRule').value = r0.match ? `${r0.match} → ${r0.folder}` : '';
@@ -705,6 +691,7 @@ function viewFolder(view) {
       box.textContent = `Everything goes into “${S.folder.path}”.`;
       return;
     }
+    if (mode === 'selected' || mode === 'tree') { box.textContent = ''; return; }
     if (mode === 'batches') {
       let cursor = 0;
       const total = S.folderGroups.reduce((sum, g) => sum + (Number(g.count) || 0), 0);
@@ -745,6 +732,124 @@ function viewFolder(view) {
     sample.forEach((f) => { (groups[bucket(f.name)] = groups[bucket(f.name)] || []).push(f.name); });
     box.innerHTML = Object.keys(groups).sort().map((g) =>
       `<b>${esc(g)}/</b> ← ${groups[g].length} file${groups[g].length === 1 ? '' : 's'}`).join(' · ');
+  };
+  S.fileRoutes = S.fileRoutes || {};
+  const checkedFiles = new Set();
+  const drawRouteFiles = () => {
+    const list = $('#routeFiles'); if (!list) return;
+    const query = $('#routeSearch').value.toLocaleLowerCase();
+    const files = S.files.filter(f => (f.name || '').toLocaleLowerCase().includes(query));
+    list.innerHTML = '';
+    const fragment = document.createDocumentFragment();
+    for (const file of files) {
+      const label = el('label', 'route-file');
+      const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = checkedFiles.has(file.id);
+      checkbox.onchange = () => { checkbox.checked ? checkedFiles.add(file.id) : checkedFiles.delete(file.id); updateRouteStatus(); };
+      const detail = document.createElement('span'); detail.className = 'route-file-detail';
+      const name = document.createElement('strong'); name.textContent = file.name || 'Unnamed file';
+      const dest = document.createElement('small'); dest.textContent = S.fileRoutes[file.id] ? '→ ' + S.fileRoutes[file.id].name : 'Not assigned';
+      detail.append(name, dest); label.append(checkbox, detail); fragment.appendChild(label);
+    }
+    list.appendChild(fragment); updateRouteStatus();
+  };
+  const updateRouteStatus = () => {
+    const assigned = S.files.filter(f => S.fileRoutes[f.id]).length;
+    $('#routeStatus').textContent = `${checkedFiles.size} selected · ${assigned} of ${S.files.length} assigned · current folder: ${S.folder.path}`;
+  };
+  $('#routeSearch').oninput = debounce(drawRouteFiles, 120);
+  $('#routeAll').onclick = () => { const q = $('#routeSearch').value.toLocaleLowerCase(); S.files.filter(f => (f.name || '').toLocaleLowerCase().includes(q)).forEach(f => checkedFiles.add(f.id)); drawRouteFiles(); };
+  $('#routeClear').onclick = () => { checkedFiles.clear(); drawRouteFiles(); };
+  $('#routeAssign').onclick = () => {
+    if (!checkedFiles.size) return toast('Select at least one file first.', 'err');
+    for (const id of checkedFiles) S.fileRoutes[id] = {id:S.selected, name:S.folder.path};
+    checkedFiles.clear(); drawRouteFiles();
+  };
+  S.manualFolders = S.manualFolders || [];
+  S.manualRoutes = S.manualRoutes || {};
+  let manualSelected = []; const manualChecked = new Set();
+  const pathKey = p => JSON.stringify(p);
+  const isPrefix = (a,b) => a.length <= b.length && a.every((v,i) => v === b[i]);
+  const manualName = () => manualSelected.length ? manualSelected.join(' / ') : '(parent folder)';
+  const nameValid = n => n && n.length <= 80 && !/[\\/:*?"<>|\x00-\x1f]/.test(n) && n === n.trim() && !/^[.]|[.]$/.test(n) && !/\s{2}/.test(n);
+  const duplicate = path => S.manualFolders.some(p => pathKey(p) === pathKey(path));
+  const validNewName = raw => {
+    const n = (raw || '').trim();
+    if (!nameValid(n)) { toast('Use 1–80 characters; avoid slashes, special path characters, repeated spaces and leading or trailing dots.', 'err'); return null; }
+    return n;
+  };
+  const drawManual = () => {
+    const folderList = $('#manualFolderList'); if (!folderList) return;
+    folderList.innerHTML = '';
+    const paths = [[], ...S.manualFolders];
+    for (const path of paths) {
+      const row = document.createElement('button'); row.type = 'button'; row.className = 'manual-folder' + (pathKey(path) === pathKey(manualSelected) ? ' active' : '');
+      row.style.paddingLeft = `${12 + Math.min(path.length, 12) * 15}px`;
+      const count = S.files.filter(f => pathKey(S.manualRoutes[f.id] || []) === pathKey(path)).length;
+      row.textContent = `${path.length ? '📁 ' + path[path.length-1] : '⌂ Parent folder'}  ·  ${count} files`;
+      row.onclick = () => { manualSelected = [...path]; drawManual(); };
+      folderList.appendChild(row);
+    }
+    const target = $('#manualFolderTarget'); const previous = target.value; target.innerHTML = '';
+    [[], ...S.manualFolders.filter(p => !isPrefix(manualSelected,p))].forEach(p => {
+      const option = document.createElement('option'); option.value = pathKey(p); option.textContent = p.join(' / ') || '(parent folder)'; target.appendChild(option);
+    });
+    if ([...target.options].some(o => o.value === previous)) target.value = previous;
+    const list = $('#manualFileList'); list.innerHTML = '';
+    const q = $('#manualSearch').value.toLocaleLowerCase();
+    const fragment = document.createDocumentFragment();
+    for (const file of S.files.filter(f => (f.name || '').toLocaleLowerCase().includes(q))) {
+      const label = el('label','route-file'); const input = document.createElement('input'); input.type = 'checkbox'; input.checked = manualChecked.has(file.id);
+      input.onchange = () => { input.checked ? manualChecked.add(file.id) : manualChecked.delete(file.id); manualStatus(); };
+      const detail = el('span','route-file-detail'); const name = document.createElement('strong'); name.textContent = file.name || 'Unnamed file';
+      const dest = document.createElement('small'); dest.textContent = '→ ' + ((S.manualRoutes[file.id] || []).join(' / ') || '(parent folder)');
+      detail.append(name,dest); label.append(input,detail); fragment.appendChild(label);
+    }
+    list.appendChild(fragment); manualStatus();
+  };
+  const manualStatus = () => { $('#manualStatus').textContent = `${manualChecked.size} selected · ${S.files.length} files · destination: ${manualName()}`; };
+  const sortTree = () => S.manualFolders.sort((a,b) => a.join('\u0000').localeCompare(b.join('\u0000'), undefined, {numeric:true}));
+  $('#manualAdd').onclick = () => {
+    if (S.manualFolders.length >= 200 || manualSelected.length >= 12) return toast('Maximum 200 folders and 12 levels.', 'err');
+    const raw = prompt('New folder inside ' + manualName()); if (raw === null) return;
+    const n = validNewName(raw); if (!n) return; const path = [...manualSelected,n];
+    if (duplicate(path)) return toast('That folder already exists in this tree.', 'err');
+    S.manualFolders.push(path); sortTree(); manualSelected = path; drawManual();
+  };
+  const rewritePaths = (oldPath, newPath) => {
+    S.manualFolders = S.manualFolders.map(p => isPrefix(oldPath,p) ? [...newPath,...p.slice(oldPath.length)] : p);
+    for (const [id,p] of Object.entries(S.manualRoutes)) if (isPrefix(oldPath,p)) S.manualRoutes[id] = [...newPath,...p.slice(oldPath.length)];
+    manualSelected = newPath; sortTree(); drawManual();
+  };
+  $('#manualRename').onclick = () => {
+    if (!manualSelected.length) return toast('Select a folder to rename.', 'err');
+    const raw = prompt('Rename folder',manualSelected[manualSelected.length-1]); if (raw === null) return;
+    const n = validNewName(raw); if (!n) return; const path = [...manualSelected.slice(0,-1), n];
+    if (pathKey(path) !== pathKey(manualSelected) && duplicate(path)) return toast('That folder already exists here.', 'err');
+    rewritePaths(manualSelected,path);
+  };
+  $('#manualMoveFolder').onclick = () => {
+    if (!manualSelected.length) return toast('Select a folder to move.', 'err');
+    const parent = JSON.parse($('#manualFolderTarget').value); const path = [...parent, manualSelected[manualSelected.length-1]];
+    const maxDepth = Math.max(...S.manualFolders.filter(p=>isPrefix(manualSelected,p)).map(p=>path.length+p.length-manualSelected.length));
+    if (maxDepth > 12) return toast('Maximum tree depth is 12.', 'err');
+    if (pathKey(path) !== pathKey(manualSelected) && duplicate(path)) return toast('A folder with that name already exists there.', 'err');
+    rewritePaths(manualSelected,path);
+  };
+  $('#manualDelete').onclick = () => {
+    if (!manualSelected.length) return toast('Select a folder to delete.', 'err');
+    if (S.manualFolders.some(p => p.length > manualSelected.length && isPrefix(manualSelected,p)) || S.files.some(f => isPrefix(manualSelected,S.manualRoutes[f.id] || []))) return toast('Move its files and delete its subfolders first.', 'err');
+    if (!confirm(`Remove ${manualName()} from this draft?`)) return;
+    S.manualFolders = S.manualFolders.filter(p => pathKey(p) !== pathKey(manualSelected)); manualSelected = []; drawManual();
+  };
+  $('#manualSearch').oninput = debounce(drawManual, 120);
+  $('#manualAll').onclick = () => { const q = $('#manualSearch').value.toLocaleLowerCase(); S.files.filter(f => (f.name || '').toLocaleLowerCase().includes(q)).forEach(f => manualChecked.add(f.id)); drawManual(); };
+  $('#manualClear').onclick = () => { manualChecked.clear(); drawManual(); };
+  $('#manualAssign').onclick = () => { if (!manualChecked.size) return toast('Select at least one file.', 'err'); for (const id of manualChecked) S.manualRoutes[id] = [...manualSelected]; manualChecked.clear(); drawManual(); };
+  $('#manualSave').onclick = async () => {
+    if (!S.jobId) return toast('Add files to create a job first.', 'err');
+    const button = $('#manualSave'); button.disabled = true;
+    try { const split = currentSplit(); await api(`/api/jobs/${S.jobId}`, {method:'PATCH', body:{destination:{...S.folder, split}}}); S.split = split; toast('Folder tree draft saved.', 'ok'); }
+    catch(e) { toast(e.message, 'err'); } finally { button.disabled = false; }
   };
   $('#splitMode').onchange = () => { saved.mode = $('#splitMode').value; setSplit(); };
   $('#addBatchRoute').onclick = () => {

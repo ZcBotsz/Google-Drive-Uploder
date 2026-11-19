@@ -47,7 +47,7 @@ from .thumbs import apply_thumb
 from ..drive.errors import (AuthExpired, DailyLimit, DriveError, NetworkError,
                             RateLimited, SessionGone, StorageQuota)
 from ..strings import esc
-from .naming import NamingOptions, build_name, dedupe_names, human_size
+from .naming import NamingOptions, build_name, dedupe_names, dedupe_job_names, human_size
 from .progress import ProgressHub, ProgressState
 
 log = logging.getLogger("driveup.worker")
@@ -214,7 +214,7 @@ class Worker:
                                     opt=opt, size=tg.get("size", 0),
                                     caption=tg.get("caption", ""),
                                     message_id=tg.get("msg_id", 0)))
-        resolved = dedupe_names(names, job.get("conflict_policy") or "rename")
+        resolved = dedupe_job_names(names, items, job, job.get("conflict_policy") or "rename")
         for i, it in enumerate(items):
             # '' means "skip" (conflict_policy=skip) — it must NOT fall back to
             # the duplicate name, or the skipped file gets uploaded anyway.
@@ -327,6 +327,19 @@ class Worker:
         reasons: list[tuple[str, str]] = []
 
         async with self.sem_for(user_id):
+            # Materialize the approved tree, including empty folders. Resolver
+            # reuses same-named Drive folders on retry and caches per job.
+            split = (job.get("destination") or {}).get("split") or {}
+            if split.get("mode") == "tree":
+                client = await self.accounts.client(user_id)
+                resolver = self._resolvers.get(job_id)
+                if resolver is None:
+                    resolver = self._resolvers[job_id] = groups.FolderResolver(
+                        client, (job.get("destination") or {}).get("folder_id") or "root")
+                for chain in split.get("folders") or []:
+                    if self._stopping or self._cancel_flags.setdefault(job_id, asyncio.Event()).is_set():
+                        return
+                    await resolver.resolve(chain)
             while True:
                 if self._stopping:
                     return
@@ -635,12 +648,19 @@ class Worker:
         split = dst.get("split") or {}
         if not split or (split.get("mode") or "none") in ("none", "off", ""):
             return {"folder_id": root, "path": ""}
+        if split.get("mode") == "selected":
+            folder_id = (split.get("plan") or {}).get(item["id"])
+            if not isinstance(folder_id, str) or not folder_id:
+                raise ValueError("Missing destination for job item")
+            return {"folder_id": folder_id, "path": (split.get("destinations") or {}).get(folder_id, "")}
         key = job["id"]
         cache = self._folders.get(key)
         if cache is None:
             cache = self._folders[key] = {}
         chain = (split.get("plan") or {}).get(item["id"]) or []
-        if not chain:
+        if split.get("mode") == "tree" and item["id"] not in (split.get("plan") or {}):
+            raise ValueError("Missing tree destination for job item")
+        if not chain and split.get("mode") != "tree":
             # the job was created before the split was saved, or the Studio
             # changed it — compute on the fly (cheap, and deterministic)
             chain = groups.plan(dst, [item]).get(item["id"]) or []

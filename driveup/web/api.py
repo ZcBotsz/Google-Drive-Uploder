@@ -310,9 +310,12 @@ async def api_patch_job(request: Request, job_id: str, body: dict = Body(...),
         split = dest.get("split")
         if split:
             mode = str(split.get("mode") or "none").lower()
-            if mode not in ("none", "type", "season", "date", "custom", "batches"):
+            if mode not in ("none", "type", "season", "date", "custom", "batches", "selected", "tree"):
                 return fail("bad_split", "unknown split mode", 422)
-            route_plan = {k: v for k, v in (split.get("plan") or {}).items()} if split.get("plan") else {}
+            raw_plan = split.get("plan") or {}
+            if not isinstance(raw_plan, dict):
+                return fail("bad_split", "Invalid folder assignment plan.", 422)
+            route_plan = dict(raw_plan)
             groups = []
             if mode == "batches":
                 items = await repo.items_of(st.db, job_id)
@@ -341,6 +344,70 @@ async def api_patch_job(request: Request, job_id: str, body: dict = Body(...),
                         return fail("bad_split", "Each batch item must map to one child folder.", 422)
                     clean_plan[item_id] = [safe_folder_name(str(chain[0]), limit=80)]
                 route_plan = clean_plan
+            destinations = {}
+            if mode == "selected":
+                items = await repo.items_of(st.db, job_id)
+                allowed = {item["id"] for item in items}
+                if not isinstance(route_plan, dict) or set(route_plan) != allowed or not allowed:
+                    return fail("bad_split", "Assign every job file to a folder.", 422)
+                if any(not isinstance(fid, str) or not fid or len(fid) > 256 for fid in route_plan.values()):
+                    return fail("bad_split", "Invalid folder assignment.", 422)
+                folder_ids = set(route_plan.values())
+                if len(folder_ids) > 100:
+                    return fail("bad_split", "Use at most 100 destination folders per job.", 422)
+                client = await _client(request, user)
+                if client is None:
+                    return fail("not_connected", "Connect Google Drive first.", 409)
+                for fid in folder_ids:
+                    if fid == "root":
+                        destinations[fid] = "My Drive"
+                        continue
+                    try:
+                        folder = await client.get(fid)
+                    except DriveError:
+                        return fail("bad_split", "A destination is not accessible in your connected Drive.", 422)
+                    if (folder.get("mimeType") != "application/vnd.google-apps.folder"
+                            or folder.get("trashed") or folder.get("capabilities", {}).get("canAddChildren") is False):
+                        return fail("bad_split", "A destination is not a writable Drive folder.", 422)
+                    destinations[fid] = str(folder.get("name") or "Folder")[:200]
+            tree_folders = []
+            if mode == "tree":
+                items = await repo.items_of(st.db, job_id)
+                if not items or set(route_plan) != {item["id"] for item in items}:
+                    return fail("bad_split", "Every job file needs a tree destination.", 422)
+                raw_folders = split.get("folders")
+                if not isinstance(raw_folders, list) or len(raw_folders) > 200:
+                    return fail("bad_split", "Use at most 200 folders in the tree.", 422)
+                def valid_chain(chain):
+                    return (isinstance(chain, list) and len(chain) <= 12 and
+                            all(isinstance(n, str) and 0 < len(n) <= 80 and
+                                safe_folder_name(n, limit=80) == n for n in chain))
+                if any(not valid_chain(c) or not c for c in raw_folders):
+                    return fail("bad_split", "Invalid folder name or tree depth (maximum 12 levels).", 422)
+                keys = [tuple(c) for c in raw_folders]
+                if len(keys) != len(set(keys)):
+                    return fail("bad_split", "Duplicate tree folder.", 422)
+                folder_set = set(keys)
+                if any(len(c) > 1 and c[:-1] not in folder_set for c in keys):
+                    return fail("bad_split", "A tree folder is missing its parent.", 422)
+                if any(not valid_chain(chain) or (chain and tuple(chain) not in folder_set)
+                       for chain in route_plan.values()):
+                    return fail("bad_split", "A file points to a missing or invalid folder.", 422)
+                root_id = new_dest["folder_id"]
+                if not isinstance(root_id, str) or not root_id or len(root_id) > 256:
+                    return fail("bad_split", "Invalid parent destination.", 422)
+                client = await _client(request, user)
+                if client is None:
+                    return fail("not_connected", "Connect Google Drive first.", 409)
+                if root_id != "root":
+                    try:
+                        folder = await client.get(root_id)
+                    except DriveError:
+                        return fail("bad_split", "The parent folder is not accessible in your connected Drive.", 422)
+                    if (folder.get("mimeType") != "application/vnd.google-apps.folder"
+                            or folder.get("trashed") or folder.get("capabilities", {}).get("canAddChildren") is False):
+                        return fail("bad_split", "The parent destination is not a writable folder.", 422)
+                tree_folders = sorted(raw_folders, key=len)
             new_dest["split"] = {
                 "mode": mode,
                 "rules": [{k: str(v) for k, v in (r or {}).items()}
@@ -348,6 +415,8 @@ async def api_patch_job(request: Request, job_id: str, body: dict = Body(...),
                 "else": str(split.get("else") or "Other")[:120],
                 "plan": route_plan,
                 "groups": groups if mode == "batches" else [],
+                "destinations": destinations if mode == "selected" else {},
+                "folders": tree_folders if mode == "tree" else [],
             }
         patch["destination"] = new_dest
     if "naming" in body:
@@ -381,7 +450,7 @@ async def recompute_names(st, job: dict, items: list) -> None:
             seq=opt.start + (i - 1) * opt.step, index=i, total=total, opt=opt,
             size=tg.get("size", 0), caption=tg.get("caption", ""),
             message_id=tg.get("msg_id", 0)))
-    resolved = naming_mod.dedupe_names(names, job.get("conflict_policy") or "rename")
+    resolved = naming_mod.dedupe_job_names(names, items, job, job.get("conflict_policy") or "rename")
     for i, it in enumerate(items):
         new = resolved[i] if i in resolved else names[i]
         if new != it["final_name"]:
@@ -400,6 +469,10 @@ async def api_preview_names(request: Request, job_id: str, body: dict = Body(def
     payload = [{"name": (i["tg"] or {}).get("name", ""), "size": (i["tg"] or {}).get("size", 0),
                 "mime": (i["tg"] or {}).get("mime", ""),
                 "caption": (i["tg"] or {}).get("caption", "")} for i in items]
+    split = (job.get("destination") or {}).get("split") or {}
+    if split.get("mode") == "tree":
+        for row, item in zip(payload, items):
+            row["folder_key"] = (split.get("plan") or {}).get(item["id"], [])
     rows = naming_mod.preview_rows(payload, opt, start=opt.start)
     return ok(rows=rows)
 
@@ -595,12 +668,7 @@ async def api_children(request: Request, parent: str = "root", page: str = "",
         return fail("not_connected", "Google Drive is not connected — sign in with Google to reconnect", 409)
     try:
         data = await client.list_folders(parent, page_token=page)
-        about = {}
-        try:
-            about = await client.about()
-        except DriveError:
-            pass
-        return ok(parent=parent, next=data["next"], folders=data["files"], about=about)
+        return ok(parent=parent, next=data["next"], folders=data["files"])
     except DriveError as e:
         return fail(e.code, str(e), 502)
 
