@@ -43,25 +43,38 @@ async def cmd_start(msg: Message, **data):
     app = app_of(data)
     lang = data["lang"]
     user = data["user"]
-    from ...config import effective_max_file_mb
+    from ...config import BRAND_NAME, effective_max_file_mb
     cap_mb = effective_max_file_mb(app.cfg)
+    global_settings = await repo.get_global(app.db)
+    drive_account = await repo.get_drive_account(app.db, user["user_id"])
+    current_plan = await repo.effective_plan(app.db, user["user_id"])
+    max_plan = await repo.get_plan(app.db, "max") or {}
+    brand = esc(global_settings.get("brand_name") or BRAND_NAME)
+    price = esc(global_settings.get("plan_price_text") or app.cfg.plan_price_text)
+    support = esc(global_settings.get("support_contact") or app.cfg.support_contact)
+    connected_line = (f"🔗 <b>{sc('DRIVE')}:</b> {esc(drive_account.get('email') or sc('CONNECTED'))}"
+                      if drive_account and not drive_account.get("needs_reconnect")
+                      else f"🔌 <b>{sc('DRIVE')}:</b> {sc('NOT CONNECTED')}")
     welcome = (
-        f"╭━━━━〔 🚀 <b>{sc('ZC DRIVE UPLOAD')}</b> 🚀 〕━━━━╮\n"
+        f"╭━━━━〔 🚀 <b>{sc(brand)}</b> 🚀 〕━━━━╮\n"
         f"│  <i>{sc('TELEGRAM · STUDIO · GOOGLE DRIVE')}</i>  │\n"
         "╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
         f"👋 <b>{sc('WELCOME')}</b>\n"
-        "Connect your Google Drive, send a file or supported link, and follow its progress. "
-        "Or open Studio to upload directly from your browser.\n\n"
-        f"🚀 <b>{sc('WHAT YOU CAN DO')}</b>\n"
-        f"• {sc('UPLOAD FILES AND SUPPORTED LINKS')}\n"
-        f"• {sc('CHOOSE DRIVE FOLDERS · RENAME · REORDER')}\n"
-        f"• {sc('TRACK TELEGRAM → SERVER → DRIVE')}\n"
-        f"• {sc('VIEW YOUR QUEUE · HISTORY · STATS')}\n\n"
-        f"⭐ <b>{sc('MAX · ₹499 / MONTH')}</b>\n"
-        f"{sc('UP TO 750 GB / DAY · 4 CONCURRENT JOBS · 5,000 FILES / JOB')}\n"
+        "Connect Google Drive, send a supported file or link, and follow progress. "
+        "You can also upload directly in the browser Studio.\n\n"
+        f"{connected_line}\n"
+        f"⭐ <b>{sc('PLAN')}:</b> {esc(current_plan.get('name') or current_plan.get('id'))}\n\n"
+        f"🚀 <b>{sc('QUICK FEATURES')}</b>\n"
+        f"• {sc('FOLDERS · BATCHES · FILE NAMING')}\n"
+        f"• {sc('UPLOAD ORDER · THUMBNAILS · STUDIO')}\n"
+        f"• {sc('LIVE PROGRESS · QUEUE · HISTORY · STATS')}\n\n"
+        f"⭐ <b>{sc('MAX')} · {price}</b>\n"
+        f"{sc('UP TO')} {max_plan.get('daily_gb', 750):g} {sc('GB / DAY')} · "
+        f"{max_plan.get('concurrent', 4)} {sc('CONCURRENT JOBS')} · "
+        f"{max_plan.get('max_files_job', 5000):,} {sc('FILES / JOB')}\n"
         f"📦 {sc('FILE CEILING')}: {cap_mb} MB · "
         f"{sc('DRIVE QUOTA AND SERVICE LIMITS APPLY')}\n\n"
-        f"💬 {sc('SUPPORT')}: @ZCQXx\n"
+        f"💬 {sc('SUPPORT')}: {support}\n"
         f"<i>{sc('CHOOSE AN ACTION BELOW')}</i>"
     )
     missing = await app.access.force_sub_missing(user["user_id"])
@@ -78,9 +91,12 @@ async def cmd_start(msg: Message, **data):
     else:
         # Every command is a button — nobody should have to remember /syntax.
         from ..menus import quick_kb
-        kb = quick_kb(is_admin=data.get("role") in ("owner", "admin", "support"))
+        is_admin = data.get("role") in ("owner", "admin", "support") or await repo.is_admin(
+            app.db, user["user_id"], app.cfg.owner_id)
+        kb = quick_kb(is_admin=is_admin,
+                      is_connected=bool(drive_account and not drive_account.get("needs_reconnect")))
     from ..ui import emoji as animated
-    welcome = animated.apply(welcome, app.cfg, await repo.get_global(app.db))
+    welcome = animated.apply(welcome, app.cfg, global_settings)
     await msg.answer(welcome, reply_markup=kb)
     await repo.audit(app.db, user["user_id"], "bot.start")
     await app.log_event("#NewUser", {"id": user["user_id"], "name": user.get("name", "")})
@@ -293,15 +309,23 @@ async def cmd_account(msg: Message, **data):
     try:
         client = await app.accounts.client(uid)
         about = await client.about()
-        free = human_bytes(about["free"]) if about["free"] >= 0 else "unlimited"
-        total = human_bytes(about["limit"]) if about["limit"] else "—"
+        total = human_bytes(about["limit"]) if about["limit"] else "no fixed limit reported"
+        total_used = human_bytes(about["usage"]) if about.get("usage_reported") else "not reported"
+        drive_used = human_bytes(about["drive_used"]) if about.get("drive_used") is not None else "not reported"
+        other_used = human_bytes(about["other_services_used"]) if about.get("other_services_used") is not None else "not reported"
+        display_name = about.get("name") or ""
+        free = human_bytes(about["free"]) if about["free"] >= 0 else "not reported"
     except Exception as e:                                # noqa: BLE001
-        free, total = "?", "?"
+        total, total_used, drive_used, other_used, free, display_name = "?", "?", "?", "?", "?", ""
 
     lines = [
         f"<b>👤 {sc('ACCOUNT OVERVIEW')}</b>",
+        (f"📛 {sc('NAME')}: <b>{esc(display_name)}</b>\n" if display_name else "") +
         f"📧 {sc('GOOGLE ACCOUNT')}: <b>{esc(acc['email'])}</b>" + (f"  ⚠️ {sc('RECONNECT NEEDED')}" if acc.get("needs_reconnect") else ""),
-        f"💾 {sc('DRIVE SPACE')}: <b>{free} free</b> of {total}",
+        f"💾 {sc('TOTAL GOOGLE STORAGE')}: <b>{total_used} used</b> / {total}",
+        f"📁 {sc('DRIVE FILES')}: <b>{drive_used} used</b>",
+        f"🌐 {sc('OTHER GOOGLE SERVICES')}: <b>{other_used} combined</b>\n<i>{sc('GMAIL AND PHOTOS ARE NOT SPLIT OUT BY THIS API')}</i>",
+        f"🆓 {sc('AVAILABLE')}: <b>{free}</b>",
         f"💎 {sc('PLAN')}: <b>{esc(plan.get('name') or plan.get('id'))}</b>"
         + (f" · {sc('UNTIL')} {unlock_at_text(plan['expires_at'], app.cfg.timezone)}" if plan.get("expires_at") else ""),
         f"📅 {sc('TODAY')}: {human_bytes(usage['bytes'])} / {plan.get('daily_gb')} GB",

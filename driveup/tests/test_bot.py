@@ -130,13 +130,28 @@ async def test_account_reports_not_connected_then_connected(botenv):
     assert "connect" in said(botenv).lower()
     await connect_drive(botenv)
     await feed(botenv, fake_tg.message("/account", uid=USER))
-    assert "me@example.com" in said(botenv)
+    text = said(botenv)
+    assert "me@example.com" in text
+    from driveup.strings import sc
+    assert sc("TOTAL GOOGLE STORAGE") in text
+    assert sc("DRIVE FILES") in text
+    assert sc("OTHER GOOGLE SERVICES") in text
+    assert sc("GMAIL AND PHOTOS ARE NOT SPLIT OUT") in text
 
 
 async def test_disconnect_removes_the_token(botenv):
     await connect_drive(botenv)
     await feed(botenv, fake_tg.message("/disconnect", uid=USER))
     assert await repo.get_drive_account(botenv["db"], USER) is None
+
+
+async def test_admin_userinfo_shows_connected_account_storage(botenv):
+    await connect_drive(botenv)
+    await feed(botenv, fake_tg.message(f"/userinfo {USER}", uid=ADMIN))
+    text = said(botenv)
+    assert "me@example.com" in text
+    assert "other Google services" in text
+    assert "Gmail and Photos are not split out" in text
 
 
 async def test_folders_lists_favourites(botenv):
@@ -251,7 +266,7 @@ async def test_a_video_creates_a_job_card(botenv):
     kb = botenv["sess"].last()["reply_markup"]["inline_keyboard"]
     labels = " ".join(b["text"] for row in kb for b in row)
     from driveup.strings import sc
-    for word in ("folder", "Naming", "Sequence", "Start", "Upload Studio", "Cancel"):
+    for word in ("folder", "Naming", "Sequence", "Start", "Upload Studio", "Discard draft"):
         assert sc(word).lower() in labels.lower()
 
 

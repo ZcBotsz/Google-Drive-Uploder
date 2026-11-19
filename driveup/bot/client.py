@@ -207,7 +207,7 @@ class GateMiddleware:
             return ""
         action = parts[1]
         arg = parts[-1] if action in self.MULTI_PART else parts[2]
-        if action in ("subok", "noop", "ntplcustom", "openstudio", "admin", "help"):
+        if action in ("subok", "noop", "ntplcustom", "openstudio", "admin", "help", "ui", "menu"): 
             return ""
         # ntpl / seqmode / folder / … carry a job id in position 2 → fall through
         # to the ownership check below so it always runs.

@@ -154,13 +154,34 @@ async def cmd_userinfo(msg: Message, **data):
     acc = await repo.get_drive_account(app.db, uid)
     lock = await repo.get_lock(app.db, uid)
     usage = await repo.quota_used(app.db, uid)
+    storage_lines = ""
+    if acc and not acc.get("needs_reconnect"):
+        try:
+            client = await app.accounts.client(uid)
+            about = await client.about()
+            total = human_bytes(about["limit"]) if about.get("limit") else "no fixed limit reported"
+            overall_used = human_bytes(about.get("usage", 0)) if about.get("usage_reported") else "not reported"
+            drive_used = human_bytes(about["drive_used"]) if about.get("drive_used") is not None else "not reported"
+            other_used = human_bytes(about["other_services_used"]) if about.get("other_services_used") is not None else "not reported"
+            free = human_bytes(about["free"]) if about.get("free", -1) >= 0 else "not reported"
+            google_name = about.get("name") or ""
+            storage_lines = (
+                (f"\n📛 Google name: {esc(google_name)}" if google_name else "")
+                + f"\n💾 total: {overall_used} used / {total} · {free} free"
+                + f"\n📁 Drive: {drive_used} used"
+                + f"\n🌐 other Google services: {other_used} combined"
+                "\n<i>Gmail and Photos are not split out by this API.</i>"
+            )
+        except Exception:  # noqa: BLE001 - account details may be temporarily unavailable
+            storage_lines = "\n💾 Drive quota details are temporarily unavailable."
     await msg.answer(
         f"<b>👤 {esc(u['name'])}</b> · <code>{uid}</code>\n"
         f"@{esc(u['username']) or '—'} · {esc(u['role'])} · {esc(u['lang'])}\n\n"
         f"💎 {esc(plan.get('name') or plan.get('id'))}\n"
-        f"📧 drive: {esc((acc or {}).get('email') or 'not connected')}\n"
+        f"📧 Drive account: {esc((acc or {}).get('email') or 'not connected')}\n"
         f"📦 {st['files']} files · {human_bytes(st['bytes'])}\n"
-        f"📅 today: {human_bytes(usage['bytes'])}\n"
+        f"📅 today: {human_bytes(usage['bytes'])}"
+        f"{storage_lines}\n"
         f"🔒 {('until ' + unlock_at_text(lock['expires_at'], app.cfg.timezone)) if lock else 'not locked'}")
 
 

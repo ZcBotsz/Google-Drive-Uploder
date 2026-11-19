@@ -62,15 +62,21 @@ class DriveClient:
     # ── about / quota ────────────────────────────────────────────────────
     async def about(self) -> dict:
         data = await self._call("GET", f"{self.API}/about", params={
-            "fields": "user(displayName,emailAddress),storageQuota(limit,usage,usageInDrive)",
+            "fields": "user(displayName,emailAddress),storageQuota(limit,usage,usageInDrive,usageInDriveTrash)",
             "supportsAllDrives": "true",
         })
         user = data.get("user", {})
         q = data.get("storageQuota", {})
         limit = int(q.get("limit", 0) or 0)
+        usage_reported = "usage" in q
         usage = int(q.get("usage", 0) or 0)
+        drive_used = int(q["usageInDrive"] or 0) if "usageInDrive" in q else None
+        drive_trash = int(q["usageInDriveTrash"] or 0) if "usageInDriveTrash" in q else None
         return {"email": user.get("emailAddress", ""), "name": user.get("displayName", ""),
-                "limit": limit, "usage": usage, "free": max(0, limit - usage) if limit else -1}
+                "limit": limit, "usage": usage, "usage_reported": usage_reported,
+                "drive_used": drive_used, "drive_trash_used": drive_trash,
+                "other_services_used": max(0, usage - drive_used) if drive_used is not None and usage_reported else None,
+                "free": max(0, limit - usage) if limit and usage_reported else -1}
 
     # ── folders ──────────────────────────────────────────────────────────
     async def list_children(self, parent: str = "root", *, page_token: str = "",

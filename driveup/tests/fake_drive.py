@@ -164,7 +164,9 @@ class FakeDrive:
     async def _about(self, req: web.Request) -> web.Response:
         return web.json_response({"user": {"emailAddress": "tester@example.com", "displayName": "Tester"},
                                   "storageQuota": {"limit": str(self.quota_limit),
-                                                   "usage": str(self.quota_used)}})
+                                                   "usage": str(self.quota_used),
+                                                   "usageInDrive": str(self.quota_used),
+                                                   "usageInDriveTrash": "0"}})
 
     async def _list(self, req: web.Request) -> web.Response:
         q = req.query.get("q", "")

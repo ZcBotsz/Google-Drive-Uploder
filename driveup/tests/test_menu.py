@@ -33,14 +33,14 @@ def test_menu_rows_are_phone_sized():
         assert len(row) <= 2, f"a row of {len(row)} would wrap badly on a phone"
     from driveup.strings import sc
     labels = [b.text for row in kb.inline_keyboard for b in row]
-    assert len(labels) == 4  # 3 compact user actions + 1 authorized admin shortcut
-    assert sc("Account & Tools") in labels
+    assert len(labels) == 7  # Six user destinations + authorized Admin shortcut
+    assert sc("Admin") in labels
 
 
 async def test_hello_greets_and_offers_buttons(botenv):
     await feed(botenv, fake_tg.message("/hello", uid=42, mid=11))
     text = said(botenv)
-    assert "Hello" in text
+    assert "ᴢᴄ ᴅʀɪᴠᴇ" in text
     sent = [c for c in botenv["sess"].calls if c["method"] == "SendMessage"]
     kb = sent[-1]["params"].get("reply_markup")
     assert kb and kb["inline_keyboard"], "no buttons on the greeting"
@@ -52,24 +52,25 @@ async def test_menu_lists_every_command(botenv):
     buttons = [b["callback_data"] for row in
                sent[-1]["params"]["reply_markup"]["inline_keyboard"] for b in row]
     callbacks = set(buttons)
-    # The home screen stays compact; the More screen leads to focused sections.
-    assert {"m:connect", "m:studio", "ui:more"} <= callbacks
+    # Home destinations stay in one compact five-button menu.
+    assert {"v1:menu:connect", "v1:ui:more"} <= callbacks
+    assert "v1:menu:studio" not in callbacks  # disconnected users connect first
     before = len(botenv["sess"].calls)
-    await feed(botenv, fake_tg.callback("ui:more", uid=42, mid=12))
+    await feed(botenv, fake_tg.callback("v1:ui:more", uid=42, mid=12))
     edits = [c for c in botenv["sess"].calls[before:] if c["method"] == "EditMessageText"]
     assert edits, "More should edit the existing menu message"
     section_callbacks = [b["callback_data"] for row in
                          edits[-1]["params"]["reply_markup"]["inline_keyboard"] for b in row]
-    assert {"ui:drive", "ui:uploads", "ui:account"} <= set(section_callbacks)
-    assert "ui:admin" not in section_callbacks
+    assert {"v1:ui:drive", "v1:ui:uploads", "v1:ui:account"} <= set(section_callbacks)
+    assert "v1:ui:admin" not in section_callbacks
     # Every user command appears in at least one focused screen.
     from driveup.bot.menus import drive_menu_kb, uploads_menu_kb, account_menu_kb
     scoped = set()
     for kb in (drive_menu_kb(), uploads_menu_kb(), account_menu_kb()):
-        scoped |= {b.callback_data[2:] for row in kb.inline_keyboard for b in row
-                   if b.callback_data and b.callback_data.startswith("m:")}
-    assert {c for c, _, _ in USER_MENU} - {"help"} <= scoped | {"help", "export"}
-    assert "m:admin" not in callbacks
+        scoped |= {b.callback_data.split(":", 2)[-1] for row in kb.inline_keyboard for b in row
+                   if b.callback_data and (b.callback_data.startswith("m:") or b.callback_data.startswith("v1:menu:"))}
+    assert {c for c, _, _ in USER_MENU} - {"help", "settings"} <= scoped | {"help", "settings", "export"}
+    assert "v1:menu:admin" not in callbacks
 
 
 async def test_a_button_runs_the_real_command(botenv):
@@ -78,7 +79,7 @@ async def test_a_button_runs_the_real_command(botenv):
     typed = said(botenv)
     assert "Commands" in typed
     before = len(botenv["sess"].calls)
-    await feed(botenv, fake_tg.callback("m:help", uid=42, mid=14))
+    await feed(botenv, fake_tg.callback("v1:menu:help", uid=42, mid=14))
     after = botenv["sess"].calls[before:]
     edits = [c for c in after if c["method"] in ("EditMessageText", "SendMessage")]
     assert edits, "the button produced no answer"
@@ -87,7 +88,7 @@ async def test_a_button_runs_the_real_command(botenv):
 
 async def test_admin_button_is_refused_for_a_normal_user(botenv):
     before = len(botenv["sess"].calls)
-    await feed(botenv, fake_tg.callback("m:stats", uid=42, mid=15))
+    await feed(botenv, fake_tg.callback("v1:menu:stats", uid=42, mid=15))
     answers = [c for c in botenv["sess"].calls[before:] if c["method"] == "AnswerCallbackQuery"]
     assert answers, "the refusal was never sent"
     assert "admin" in (answers[-1]["params"].get("text") or "").lower()

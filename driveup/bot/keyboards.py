@@ -12,7 +12,7 @@ from .ui.buttons import auto as B
 from aiogram.types import InlineKeyboardMarkup as KM
 
 from ..strings import t
-from .ui.buttons import danger, primary, success, styled
+from .ui.buttons import danger, plain, primary, success, styled
 
 MAX_CB = 64
 
@@ -33,7 +33,8 @@ def job_card_kb(job_id: str, *, has_files: bool = True, lang: str = "en",
         rows.append([success(t("btn_start", lang), callback_data=cb("start", job_id))])
     if studio_url:
         rows.append([primary(t("btn_studio", lang), url=studio_url)])
-    rows.append([danger(t("btn_cancel", lang), callback_data=cb("drop", job_id))])
+    rows.append([danger("Discard draft", callback_data=cb("dropconfirm", job_id))])
+    rows.append([plain("⌂ Home", callback_data="v1:ui:home")])
     return KM(inline_keyboard=rows)
 
 
@@ -83,8 +84,11 @@ def queue_kb(job_id: str, status: str) -> KM:
 def naming_kb(lang: str = "en", job_id: str = "") -> KM:
     presets = ["{original}.{ext}", "{seq:03d} - {original}.{ext}",
                "Module 1 - {index:02d} {original}", "{date} {original}.{ext}"]
-    rows = [[B(text=p, callback_data=cb(f"ntpl{i}", job_id))] for i, p in enumerate(presets)]
-    rows.append([B(text="✍️ Custom template", callback_data=cb("ntplcustom", job_id))])
+    rows = [[primary(p, icon="✏️", callback_data=cb(f"ntpl{i}", job_id))] for i, p in enumerate(presets)]
+    rows.append([primary("Custom template", icon="✍️", callback_data=cb("ntplcustom", job_id))])
+    if job_id:
+        rows.append([plain("⬅ Back to upload", callback_data=cb("jobcard", job_id)),
+                     plain("⌂ Home", callback_data="v1:ui:home")])
     return KM(inline_keyboard=rows)
 
 
@@ -95,5 +99,8 @@ def sequence_kb(mode: str, job_id: str = "") -> KM:
               if mode == m else
               B(text=label, callback_data=cb("seqmode", m + (f":{job_id}" if job_id else ""))))]
             for m, label in modes]
-    rows.append([primary("🌐 Drag & drop in Studio", callback_data=cb("openstudio"))])
+    rows.append([primary("Drag & drop in Studio", icon="🌐", callback_data=cb("openstudio"))])
+    if job_id:
+        rows.append([plain("⬅ Back to upload", callback_data=cb("jobcard", job_id)),
+                     plain("⌂ Home", callback_data="v1:ui:home")])
     return KM(inline_keyboard=rows)

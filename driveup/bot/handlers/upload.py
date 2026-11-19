@@ -9,7 +9,7 @@ from typing import Optional
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery
-from ..ui.buttons import auto as B
+from ..ui.buttons import auto as B, plain, primary, success
 from aiogram.types import InlineKeyboardMarkup as KM
 from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.types import Message
@@ -21,7 +21,7 @@ from ...core.preflight import destination_problem, storage_problem
 from ...net import fetch
 from ...core.sequence import apply_mode, parse_message_link, parse_range
 from ...db import repo
-from ...strings import esc, t
+from ...strings import esc, sc, t
 from ..keyboards import (cb, job_card_kb, naming_kb, progress_kb, queue_kb,
                          sequence_kb)
 from ..ui.cards import job_card, progress_card, summary_card
@@ -272,20 +272,59 @@ async def show_folder_menu(call: CallbackQuery, data: dict) -> None:
     job = data.get("job")
     uid = data["user"]["user_id"]
     if not job:
-        return await call.answer("job not found", show_alert=True)
-    s = await repo.get_user(app.db, uid)
-    st = s.get("settings", {})
+        return await call.answer("Job not found. Open a job card and try again.", show_alert=True)
     favs = await repo.list_favourites(app.db, uid)
-    rows = [[B(text=f"{'✅ ' if (job['destination'] or {}).get('folder_id') == f['folder_id'] else '📁'} "
-                     f"{f['label'] or f['folder_id'][:18]}",
-               callback_data=cb("setfav", f["folder_id"]))] for f in favs]
-    rows.append([B(text="⌂ My Drive", callback_data=cb("setfav", "root"))])
-    rows.append([B(text="🔗 Paste a folder link", callback_data=cb("setlink"))])
-    rows.append([B(text="🌐 Browse in Studio", url=app.studio_url(job["id"], uid))])
-    await call.message.answer(
-        f"📂 <b>Destination</b>\n\nNow: {esc((job['destination'] or {}).get('path', 'My Drive'))}\n\n"
-        "Pick a favourite, or paste any Drive folder link.",
+    rows = [[primary(f"{'✅ ' if (job['destination'] or {}).get('folder_id') == f['folder_id'] else '📁 '}{f['label'] or f['folder_id'][:18]}",
+                     icon="📁", callback_data=cb("setfav", f["folder_id"]))] for f in favs[:5]]
+    rows.append([primary("My Drive root", icon="📁", callback_data=cb("setfav", "root")),
+                 primary("Paste folder link", icon="🔗", callback_data=cb("setlink"))])
+    rows.append([primary("Browse in Studio", icon="🌐", url=app.studio_url(job["id"], uid))])
+    rows.append([plain("⬅ Back to upload", callback_data=cb("jobcard", job["id"])),
+                 plain("⌂ Home", callback_data="v1:ui:home")])
+    await call.message.edit_text(
+        f"📂 <b>{sc('DESTINATION FOLDER')}</b>\n"
+        f"<i>{sc('CURRENT')}: {esc((job['destination'] or {}).get('path', 'My Drive'))}</i>\n\n"
+        "Choose a saved destination or browse in Studio.",
         reply_markup=KM(inline_keyboard=rows))
+    await call.answer()
+
+
+async def _edit_job_card(call: CallbackQuery, app, job: dict, lang: str = "en") -> None:
+    """Render the existing draft in place after a sub-screen action."""
+    items = await repo.items_of(app.db, job["id"])
+    totals = job.get("totals") or await repo.recompute_totals(app.db, job["id"])
+    dest = (job.get("destination") or {}).get("path", "My Drive")
+    text = job_card(files=len(items), size=totals.get("bytes", 0), dest=dest, lang=lang)
+    kb = job_card_kb(job["id"], has_files=bool(items), lang=lang,
+                     studio_url=app.studio_url(job["id"], job["user_id"]))
+    try:
+        await call.message.edit_text(text, reply_markup=kb)
+    except Exception as e:  # noqa: BLE001
+        log.info("could not refresh job card %s: %s", job["id"], e)
+
+
+@router.callback_query(F.data.startswith("v1:jobcard:"))
+async def cb_job_card(call: CallbackQuery, **data):
+    job = data.get("job")
+    if not job:
+        return await call.answer("This upload is no longer available.", show_alert=True)
+    await _edit_job_card(call, app_of(data), job, data.get("lang", "en"))
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("v1:dropconfirm:"))
+async def cb_drop_confirm(call: CallbackQuery, **data):
+    job = data.get("job")
+    if not job:
+        return await call.answer("This upload is no longer available.", show_alert=True)
+    kb = KM(inline_keyboard=[[
+        danger("Discard this draft", callback_data=cb("drop", job["id"])),
+        plain("Keep editing", callback_data=cb("jobcard", job["id"]))],
+        [plain("⌂ Home", callback_data="v1:ui:home")]])
+    await call.message.edit_text(
+        f"🗑 <b>{sc('DISCARD THIS UPLOAD?')}</b>\n"
+        f"{sc('THIS REMOVES THE DRAFT AND ITS QUEUED ITEMS.')}\n"
+        f"<code>{job['id'][:8]}</code>", reply_markup=kb)
     await call.answer()
 
 
@@ -302,20 +341,28 @@ async def cb_set_fav(call: CallbackQuery, **data):
         except Exception:                                 # noqa: BLE001
             path = "Drive folder"
     await repo.update_job(app.db, job["id"], destination={"folder_id": fid, "path": path})
-    await call.message.edit_text(
-        f"✅ Destination: <b>{esc(path)}</b>\n\nTap /queue or the job card to continue.")
-    await call.answer("saved")
+    job = await repo.get_job(app.db, job["id"])
+    await _edit_job_card(call, app, job, data.get("lang", "en"))
+    await call.answer("Destination saved")
 
 
 @router.callback_query(F.data == cb("setlink"))
 async def cb_set_link(call: CallbackQuery, **data):
     app = app_of(data)
-    await call.message.answer(
-        "🔗 Paste the Google Drive folder link here (it contains <code>/folders/…</code>).")
+    uid = data["user"]["user_id"]
+    await call.message.edit_text(
+        f"🔗 <b>{sc('CHOOSE A DRIVE FOLDER')}</b>\n"
+        "Send the Google Drive folder link in your next message.",
+        reply_markup=KM(inline_keyboard=[[
+            plain("⬅ Back to upload", callback_data=cb("jobcard", (data.get("job") or {}).get("id", ""))),
+            plain("⌂ Home", callback_data="v1:ui:home")]]))
     await call.answer()
-    # the next text message is consumed by on_link_text via a tiny state flag
     app.pending_link = getattr(app, "pending_link", set())
-    app.pending_link.add(data["user"]["user_id"])
+    app.pending_link.add(uid)
+    messages = getattr(app, "pending_link_message", None)
+    if messages is None:
+        messages = app.pending_link_message = {}
+    messages[uid] = call.message.message_id
 
 
 @router.message(F.text.regexp(r"https?://|folder|drive\.google\.com"))
@@ -327,10 +374,19 @@ async def on_link_text(msg: Message, **data):
     link = msg.text or ""
     if uid in pending:
         pending.discard(uid)
+        menu_mid = getattr(app, "pending_link_message", {}).pop(uid, None)
         fid = folder_id_from_url(link)
         if not fid:
-            return await msg.answer("❌ That is not a Drive folder link. It should look like\n"
-                                    "<code>https://drive.google.com/drive/folders/1AbC…</code>")
+            try:
+                if menu_mid:
+                    return await app.bot.edit_message_text(
+                        chat_id=msg.chat.id, message_id=menu_mid,
+                        text="❌ <b>That isn’t a Drive folder link.</b> Send a valid folder link and try again.",
+                        parse_mode="HTML", reply_markup=KM(inline_keyboard=[[
+                            plain("⌂ Home", callback_data="v1:ui:home")]]))
+            except Exception:  # noqa: BLE001
+                pass
+            return await msg.answer("That isn’t a valid Drive folder link. Try again from the folder menu.")
         job_id = app.draft_jobs.get(uid)
         if not job_id:
             return await msg.answer(t("no_files", data["lang"]))
@@ -342,6 +398,21 @@ async def on_link_text(msg: Message, **data):
             pass
         await repo.update_job(app.db, job_id, destination={"folder_id": fid, "path": path})
         await repo.add_favourite(app.db, uid, fid, path)
+        job = await repo.get_job(app.db, job_id)
+        items = await repo.items_of(app.db, job_id)
+        totals = job.get("totals") or await repo.recompute_totals(app.db, job_id)
+        if menu_mid:
+            try:
+                await app.bot.edit_message_text(
+                    chat_id=msg.chat.id, message_id=menu_mid,
+                    text=f"✅ <b>Destination saved:</b> {esc(path)}\n\n" + job_card(
+                        files=len(items), size=totals.get("bytes", 0), dest=path, lang=data["lang"]),
+                    parse_mode="HTML", reply_markup=job_card_kb(
+                        job_id, has_files=bool(items), lang=data["lang"],
+                        studio_url=app.studio_url(job_id, uid)))
+                return
+            except Exception:  # noqa: BLE001
+                pass
         return await msg.answer(f"✅ Destination: <b>{esc(path)}</b>")
     # a message link is a bulk-intake request (Flow 3)
     parsed = parse_message_link(link)
@@ -380,9 +451,11 @@ async def cb_naming(call: CallbackQuery, **data):
     app = app_of(data)
     job = data.get("job")
     opt = naming_mod.NamingOptions.from_dict(job.get("naming") or {})
-    await call.message.answer(
-        f"✏️ <b>Naming</b>\n\nCurrent template:\n<code>{esc(opt.template)}</code>\n\n"
-        "Variables: {original} {ext} {seq:03d} {index} {total} {date} {time} {size} {type}",
+    await call.message.edit_text(
+        f"✏️ <b>{sc('FILE NAMING')}</b>\n"
+        f"<i>{sc('CURRENT TEMPLATE')}</i>\n<code>{esc(opt.template)}</code>\n\n"
+        f"{sc('CHOOSE A PRESET OR CUSTOMIZE IT')}\n"
+        "<code>{original} {ext} {seq:03d} {index} {total} {date} {time} {size} {type}</code>",
         reply_markup=naming_kb(data["lang"], job["id"] if job else ""))
     await call.answer()
 
@@ -399,9 +472,11 @@ async def cb_naming_preset(call: CallbackQuery, **data):
     action = (call.data or "").split(":")[1] if (call.data or "").count(":") >= 1 else ""
     tail = action.replace("ntpl", "", 1)
     if tail == "custom":
-        await call.message.answer(
-            "✍️ Send the template as your next message, e.g.\n"
-            "<code>{seq:03d} - {original}.{ext}</code>")
+        await call.message.edit_text(
+            f"✍️ <b>{sc('CUSTOM FILE-NAME TEMPLATE')}</b>\n"
+            "Send the pattern in your next message, for example:\n"
+            "<code>{seq:03d} - {original}.{ext}</code>",
+            reply_markup=KM(inline_keyboard=[[plain("⌂ Home", callback_data="v1:ui:home")]]))
         app.pending_template = getattr(app, "pending_template", set())
         app.pending_template.add(uid)
         return await call.answer()
@@ -445,9 +520,10 @@ async def on_template_text(msg: Message, **data):
 @router.callback_query(F.data.startswith("v1:seq:"))
 async def cb_sequence(call: CallbackQuery, **data):
     job = data.get("job")
-    await call.message.answer(
-        f"🔢 <b>Sequence</b>\n\nCurrent: <b>{esc(job.get('sequence_mode', 'telegram_order'))}</b>\n"
-        "Strict mode uploads one by one in this order.",
+    await call.message.edit_text(
+        f"🔢 <b>{sc('FILE ORDER')}</b>\n"
+        f"<i>{sc('CURRENT')}: {esc(job.get('sequence_mode', 'telegram_order'))}</i>\n\n"
+        "Choose an order. The worker follows it when the job runs.",
         reply_markup=sequence_kb(job.get("sequence_mode", "telegram_order"), job["id"]))
     await call.answer()
 
