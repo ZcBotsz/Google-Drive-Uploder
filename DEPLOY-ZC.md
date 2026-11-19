@@ -70,7 +70,7 @@ These can also be set from the website Admin → Settings. The bot needs post pe
 
 ## 7. Use the website without opening the bot
 
-1. Open the service root URL (`https://YOUR-RENDER-SERVICE.onrender.com/`) and choose **Sign in with Google**. The browser goes through the same Google OAuth callback configured in Step 3; after consent it returns directly to `/studio` with a secure web session.
+1. Open the service root URL (`https://YOUR-RENDER-SERVICE.onrender.com/`); it opens `/studio`. If signed out, choose **Continue with Google Drive**. After consent the browser returns to the private Studio with a secure web session. Public product/plan information remains at `/home`.
 2. The user can upload files from the browser, choose Drive folders, adjust supported naming/order settings, watch progress, and review their upload history without starting a Telegram chat. Large selections are transferred in 20-file chunks and remain one job; manual batch routing can assign exact file counts to named child folders. Google Drive quota, deployment/API ceilings, persistent disk availability for staged uploads, and the user’s plan still apply.
 3. This login does not ask for a separate website password. Google OAuth authorizes the Google account for Drive access. `/connect` also starts this direct web flow.
 4. The Telegram bot remains optional for website-originated uploads. Telegram-message intake, bot notifications, and bot-only commands still inherently use Telegram. The Admin panel keeps its existing protected admin sign-in flow; `/admin` remains permission-checked.

@@ -166,14 +166,18 @@ def create_app(*, db, cfg: Settings, bot, worker, accounts, access, hub=None,
             return RedirectResponse("/auth/google/start", status_code=303)
         return RedirectResponse("/auth/google/login", status_code=303)
 
-    @app.get("/", response_class=HTMLResponse)
-    async def index(request: Request):
-        """Public ZC DriveUp homepage, styled after the user's supplied design."""
+    @app.get("/")
+    async def index():
+        """The primary website opens the Studio; authentication protects its data."""
+        return RedirectResponse("/studio", status_code=307)
+
+    @app.get("/home", response_class=HTMLResponse)
+    async def public_home():
+        """Optional public product/plan information; it never contains private data."""
         home = STATIC / "home.html"
         if not home.exists():
             return HTMLResponse(f"<h1>{html.escape(BRAND_NAME)}</h1><a href='/studio'>Open Studio</a>")
-        # Public CTA begins the bot-free Google OAuth login; no Telegram deep-link is needed.
-        body = home.read_text(encoding="utf-8").replace("{{BOT_LINK}}", "/auth/google/login")
+        body = home.read_text(encoding="utf-8").replace("{{BOT_LINK}}", "/studio")
         return HTMLResponse(body, status_code=200)
 
     @app.get("/studio", response_class=HTMLResponse)
@@ -193,8 +197,8 @@ def create_app(*, db, cfg: Settings, bot, worker, accounts, access, hub=None,
               <h1>{html.escape(BRAND_NAME)} Studio</h1>
               <p>Sign in with Google to connect your Drive and open the Studio. You can use the website directly; Telegram is optional.</p>
               <p><a class="btn primary" href="/auth/google/login">Continue with Google Drive</a></p>
-              <p class="hint">Your files remain in the Google account you authorize. The connected Drive quota and service limits still apply.</p>
-              <p><a href="/">Back to ZC Drive Upload</a></p>
+              <p class="hint">Your workspace is tied to your sign-in. Other regular users cannot access your jobs or files; authorized admin roles retain service tools. Google Drive quota and service limits apply.</p>
+              <p><a href="/home">About ZC Drive Upload</a></p>
             </div></div></body></html>"""
             return HTMLResponse(html_body, status_code=200)
         return HTMLResponse((STATIC / "index.html").read_text(encoding="utf-8"))

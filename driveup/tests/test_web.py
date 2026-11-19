@@ -109,14 +109,15 @@ async def make_job(web, user_id: int = 55, files=(("a.bin", b"1234"),)) -> str:
 
 
 # ── public pages and auth ──────────────────────────────────────────────────
-async def test_homepage_is_public_and_studio_is_separate(web):
-    r = await web["client"].get("/")
-    assert r.status_code == 200
-    assert "UPLOAD IN STUDIO" in r.text
-    assert 'href="/studio"' in r.text
-    assert "private user" not in r.text.lower()
+async def test_root_opens_studio_and_public_home_is_separate(web):
+    r = await web["client"].get("/", follow_redirects=False)
+    assert r.status_code == 307 and r.headers["location"] == "/studio"
+    home = await web["client"].get("/home")
+    assert home.status_code == 200 and "UPLOAD IN STUDIO" in home.text
+    assert 'href="/studio"' in home.text
     studio = await web["client"].get("/studio")
     assert "Continue with Google Drive" in studio.text
+    assert "Other regular users cannot access your jobs or files" in studio.text
 
 
 async def test_no_session_is_rejected(web):
@@ -554,11 +555,11 @@ async def test_admin_pages_render(web):
 
 
 async def test_homepage_shows_the_zc_driveup_landing_site(web):
-    r = await web["client"].get("/")
+    r = await web["client"].get("/home")
     assert r.status_code == 200
     assert "ZC DRIVE UPLOAD" in r.text and "Send it once." in r.text
     assert "Browser → Server" in r.text and "Server → Drive" in r.text
-    assert 'href="/auth/google/login"' in r.text
+    assert 'href="/studio"' in r.text
     assert "₹499" in r.text and "up to 750 GB/day" in r.text
     assert "/studio" in r.text and "@ZCQXx" in r.text
 
