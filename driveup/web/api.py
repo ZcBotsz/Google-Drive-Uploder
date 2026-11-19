@@ -188,6 +188,8 @@ async def api_browser_upload(request: Request, files: List[UploadFile] = File(..
         target_job = await owned_job(request, job_id, user)
         if not target_job:
             return fail("not_found", "job not found", 404)
+        if await st.db.one("SELECT job_id FROM channel_batches WHERE job_id=? AND state='open'", (job_id,)):
+            return fail("collection_open", "Finish the channel batch before editing it.", 409)
         if target_job["status"] != "draft":
             return fail("locked", "Files can only be added to a draft upload.", 409)
     decision = await st.access.gate(user["user_id"], scope="upload", need_connect=True,
@@ -295,6 +297,8 @@ async def api_patch_job(request: Request, job_id: str, body: dict = Body(...),
     job = await owned_job(request, job_id, user)
     if not job:
         return fail("not_found", "job not found", 404)
+    if await st.db.one("SELECT job_id FROM channel_batches WHERE job_id=? AND state='open'", (job_id,)):
+        return fail("collection_open", "Finish the channel batch before editing it.", 409)
     if job["status"] in ("running", "queued"):
         return fail("locked", "the job is already running", 409)
     patch: Dict[str, Any] = {}
@@ -406,6 +410,8 @@ async def api_delete_item(request: Request, job_id: str, item_id: str,
     job = await owned_job(request, job_id, user)
     if not job:
         return fail("not_found", "job not found", 404)
+    if await st.db.one("SELECT job_id FROM channel_batches WHERE job_id=? AND state='open'", (job_id,)):
+        return fail("collection_open", "Finish the channel batch before editing it.", 409)
     items = await repo.items_of(st.db, job_id)
     target_item = next((i for i in items if i["id"] == item_id), None)
     if not target_item:
@@ -430,6 +436,8 @@ async def api_reorder(request: Request, job_id: str, body: dict = Body(...),
     job = await owned_job(request, job_id, user)
     if not job:
         return fail("not_found", "job not found", 404)
+    if await st.db.one("SELECT job_id FROM channel_batches WHERE job_id=? AND state='open'", (job_id,)):
+        return fail("collection_open", "Finish the channel batch before editing it.", 409)
     order = [str(x) for x in (body.get("order") or [])]
     items = await repo.items_of(st.db, job_id)
     ids = [i["id"] for i in items]
@@ -448,6 +456,8 @@ async def api_start(request: Request, job_id: str, body: dict = Body(default={})
     job = await owned_job(request, job_id, user)
     if not job:
         return fail("not_found", "job not found", 404)
+    if await st.db.one("SELECT job_id FROM channel_batches WHERE job_id=? AND state='open'", (job_id,)):
+        return fail("collection_open", "Finish the channel batch in the bot before starting this upload.", 409)
     decision = await st.access.gate(user["user_id"], scope="upload", need_connect=True,
                                     feature="web_studio")
     if not decision:
@@ -485,6 +495,9 @@ async def _job_control(request: Request, job_id: str, action: str) -> JSONRespon
     job = await repo.get_job(st.db, job_id)
     if not job:
         return fail("not_found", "job not found", 404)
+    if await st.db.one(
+            "SELECT job_id FROM channel_batches WHERE job_id=? AND state='open'", (job_id,)):
+        return fail("collection_open", "Finish the channel batch in the bot first.", 409)
     if action == "pause":
         await st.worker.pause(job_id)
     elif action == "resume":
@@ -787,7 +800,9 @@ async def google_callback(request: Request, code: str = "", state: str = "",
         request.client.host if request.client else "",
         request.headers.get("user-agent", ""))
     proto = request.headers.get("x-forwarded-proto", request.url.scheme).split(",")[0].strip()
-    response = RedirectResponse("/studio", status_code=303)
+    # Return directly to the private workspace with an explicit success marker so
+    # the dashboard can confirm the Drive connection and show its upload action.
+    response = RedirectResponse("/studio?connected=1", status_code=303)
     set_session_cookie(response, sid, secure=proto == "https")
     response.delete_cookie("du_oauth_state", path="/")
     return response

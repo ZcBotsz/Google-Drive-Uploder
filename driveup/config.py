@@ -148,6 +148,8 @@ class Settings:
     log_channel_id: str = field(default_factory=lambda: _s("LOG_CHANNEL_ID"))
     lock_channel_id: str = field(default_factory=lambda: _s("LOCK_CHANNEL_ID"))
     dump_channel_id: str = field(default_factory=lambda: _s("DUMP_CHANNEL_ID"))
+    # Optional private intake channel for owner-controlled batch collection.
+    collect_channel_id: str = field(default_factory=lambda: _s("COLLECT_CHANNEL_ID"))
     force_sub_channels: List[str] = field(default_factory=lambda: _list("FORCE_SUB_CHANNELS"))
 
     # ── Locks / abuse ─────────────────────────────────────────────────────

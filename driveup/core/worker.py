@@ -224,6 +224,10 @@ class Worker:
 
     # ── the job ──────────────────────────────────────────────────────────
     async def _run_job(self, job_id: str) -> None:
+        # Defense in depth: no worker may process an unsealed channel batch.
+        if await self.db.one("SELECT job_id FROM channel_batches WHERE job_id=? AND state='open'", (job_id,)):
+            log.warning("Refusing to run an open channel collection batch")
+            return
         async with self._global:
             try:
                 await self._run_job_inner(job_id)

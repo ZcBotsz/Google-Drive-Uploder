@@ -565,6 +565,8 @@ async def cb_start(call: CallbackQuery, **data):
     lang = data["lang"]
     if not job:
         return await call.answer("job not found", show_alert=True)
+    if await app.db.one("SELECT job_id FROM channel_batches WHERE job_id=? AND state='open'", (job["id"],)):
+        return await call.answer("Finish the channel batch first.", show_alert=True)
     decision = await app.access.gate(job["user_id"], scope="upload", need_connect=True)
     if not decision:
         return await call.message.answer(decision.screen)
@@ -602,6 +604,8 @@ async def cb_start(call: CallbackQuery, **data):
 async def cb_pause_resume(call: CallbackQuery, **data):
     app = app_of(data)
     job = data.get("job")
+    if job and await app.db.one("SELECT job_id FROM channel_batches WHERE job_id=? AND state='open'", (job["id"],)):
+        return await call.answer("Finish the channel batch first.", show_alert=True)
     if not job:
         return await call.answer("job not found", show_alert=True)
     if job["status"] == "paused":
@@ -620,6 +624,8 @@ async def cb_pause_resume(call: CallbackQuery, **data):
 async def cb_cancel(call: CallbackQuery, **data):
     app = app_of(data)
     job = data.get("job")
+    if job and await app.db.one("SELECT job_id FROM channel_batches WHERE job_id=? AND state='open'", (job["id"],)):
+        return await call.answer("Finish the channel batch first.", show_alert=True)
     if not job:
         return await call.answer("job not found", show_alert=True)
     await app.worker.cancel(job["id"])
@@ -632,6 +638,8 @@ async def cb_cancel(call: CallbackQuery, **data):
 async def cb_retry(call: CallbackQuery, **data):
     app = app_of(data)
     job = data.get("job")
+    if job and await app.db.one("SELECT job_id FROM channel_batches WHERE job_id=? AND state='open'", (job["id"],)):
+        return await call.answer("Finish the channel batch first.", show_alert=True)
     n = await repo.retry_failed(app.db, job["id"])
     await repo.update_job(app.db, job["id"], status="queued")
     app.worker.spawn(job["id"])
@@ -643,6 +651,8 @@ async def cb_retry(call: CallbackQuery, **data):
 async def cb_drop(call: CallbackQuery, **data):
     app = app_of(data)
     job = data.get("job")
+    if job and await app.db.one("SELECT job_id FROM channel_batches WHERE job_id=? AND state='open'", (job["id"],)):
+        return await call.answer("Finish the channel batch first.", show_alert=True)
     if job:
         await repo.update_job(app.db, job["id"], status="cancelled")
         app.draft_jobs.pop(job["user_id"], None)

@@ -23,7 +23,9 @@ def test_every_shipped_command_has_a_button():
     found = set()
     for f in handlers.glob("*.py"):
         found |= set(re.findall(r'Command\("([a-z_]+)"\)', f.read_text()))
-    missing = found - ALL_COMMANDS - {"start", "menu", "hello"}
+    # Optional, owner-only channel commands do not alter the shared bot menu;
+    # the active collection card supplies the Finish button instead.
+    missing = found - ALL_COMMANDS - {"start", "menu", "hello", "finish", "channel_status"}
     assert not missing, f"commands with no button: {sorted(missing)}"
 
 
