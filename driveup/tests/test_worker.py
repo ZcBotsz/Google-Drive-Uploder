@@ -456,3 +456,30 @@ async def test_manual_tree_same_names_different_folders_not_skipped(env):
     await wait_done(worker, job_id, db)
     assert [i['state'] for i in await repo.items_of(db,job_id)] == ['done','done']
     assert len([f for f in env['fd'].files.values() if f['name'] == 'same.bin']) == 2
+
+@pytest.mark.asyncio
+async def test_one_completion_message_when_existing_status_can_be_edited(env):
+    job_id = await make_job(env, [('one.bin', b'a'*100)])
+    db, worker, bot = env['db'], env['worker'], env['bot']
+    await repo.update_job(db, job_id, status='queued', status_message={'chat_id':env['uid'], 'message_id':55})
+    worker.spawn(job_id)
+    await wait_done(worker, job_id, db)
+    await worker._jobs[job_id]
+    from driveup.bot.ui.cards import summary_card
+    prefix = "Upload finished"
+    edits = [e for e in bot.edits if e['chat_id'] == env['uid'] and prefix in e['text']]
+    sends = [m for m in bot.sent if m['chat_id'] == env['uid'] and prefix in m['text']]
+    assert len(edits) == 1 and not sends
+
+@pytest.mark.asyncio
+async def test_completion_falls_back_to_one_send_without_status_message(env):
+    job_id = await make_job(env, [('one.bin', b'a'*100)])
+    db, worker, bot = env['db'], env['worker'], env['bot']
+    await repo.update_job(db, job_id, status='queued')
+    worker.spawn(job_id)
+    await wait_done(worker, job_id, db)
+    await worker._jobs[job_id]
+    from driveup.bot.ui.cards import summary_card
+    prefix = "Upload finished"
+    sends = [m for m in bot.sent if m['chat_id'] == env['uid'] and prefix in m['text']]
+    assert len(sends) == 1

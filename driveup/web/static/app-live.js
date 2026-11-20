@@ -2,7 +2,7 @@
    Classic script (no bundler): app-core.js defines state + helpers,
    app-views.js the wizard steps, app.js wires the page and boots. */
 // ── step 6: live progress (SSE) ────────────────────────────────────────────
-const LIVE = { items: {}, total: 0, bytesDone: 0, bytesTotal: 0, logs: [] };
+const LIVE = { items: {}, total: 0, bytesDone: 0, bytesTotal: 0, logs: [], lastEvent: 0 };
 
 function viewLive(view) {
   const c = el('div', 'card');
@@ -32,6 +32,11 @@ function viewLive(view) {
         <div class="hint" style="margin-top:8px" id="liveName"></div>
       </div>
     </div>
+    <div class="live-hops" aria-live="polite">
+      <div class="live-hop"><div class="live-hop-title"><strong id="downloadTitle">Download to server</strong><span id="downloadText">0%</span></div><div class="track"><div class="fill" id="downloadFill"></div></div><small id="downloadBytes">Waiting for data</small></div>
+      <div class="live-hop"><div class="live-hop-title"><strong>Upload to Google Drive</strong><span id="uploadText">0%</span></div><div class="track"><div class="fill" id="uploadFill"></div></div><small id="uploadBytes">Waiting for data</small></div>
+      <p class="hint">Overall progress counts bytes uploaded to Drive. Transfers may stream both stages at once.</p>
+    </div>
     <div class="row tight" style="margin-bottom:10px">
       <button class="btn sm" id="pauseBtn">⏸ Pause</button>
       <button class="btn sm" id="resumeBtn">▶️ Resume</button>
@@ -39,8 +44,7 @@ function viewLive(view) {
     </div>
     <div id="prows"></div>`;
   view.appendChild(c);
-  const firstHop = S.source?.kind === 'web_studio' ? 'Browser → Server' : 'Telegram → Server';
-  $('#stageCaption').textContent = `${firstHop} complete · Server → Drive in progress`;
+  $('#stageCaption').textContent = 'Preparing transfer. Waiting for live progress…';
 
   const con = el('div', 'card');
   con.innerHTML = `<h3>Log</h3><div class="console" id="consoleLog"
@@ -98,7 +102,7 @@ function drawLive() {
 async function control(action) {
   try {
     await api(`/api/jobs/${S.jobId}/${action}`, { method: 'POST' });
-    if (action === 'pause') logLine('paused by user', 'warn');
+    if (action === 'pause') logLine('pause requested; the current file may finish first', 'warn');
     if (action === 'resume') logLine('resumed by user', 'ok');
     if (action === 'retry-failed') logLine('retrying failed items', 'ok');
     toast(action.replace('-', ' '), 'ok');
@@ -114,7 +118,8 @@ function attachSSE() {
       let d;
       try { d = JSON.parse(ev.data); } catch (_) { return; }
       if (d.stage === 'job-finished') { es.close(); refreshJobThenDone(); return; }
-      LIVE.items[d.item_id] = { ...LIVE.items[d.item_id], ...d };
+      LIVE.lastEvent = Date.now();
+      if (d.item_id) LIVE.items[d.item_id] = { ...LIVE.items[d.item_id], ...d };
       LIVE.total = d.count || LIVE.total;
       applyProgress(d);
     };
@@ -141,7 +146,7 @@ async function pollJob() {
       LIVE.bytesDone = job.totals.bytes_done;
     }
     drawLive();
-    applyProgress(job);
+    if (Date.now() - LIVE.lastEvent > 5000) applyProgress({status: job.status});
     if (job.status === 'done') { refreshJobThenDone(); return; }
     if (['failed', 'cancelled'].includes(job.status)) {
       logLine(`job ${job.status}`, 'err');
@@ -152,26 +157,30 @@ async function pollJob() {
 }
 
 function applyProgress(d) {
-  const pct = d.overall_pct ?? (LIVE.bytesTotal
-    ? (LIVE.bytesDone / LIVE.bytesTotal) * 100 : 0);
+  const pct = d.overall_pct ?? (LIVE.bytesTotal ? (LIVE.bytesDone / LIVE.bytesTotal) * 100 : 0);
   setRing(pct);
-  const sp = $('#speedPill');
-  if (sp) sp.textContent = d.speed ? `⚡ ${humanBytes(d.speed)}/s` : '⚡ —';
-  if (d.speed) S.measuredSpeed = d.speed;
-  const et = $('#etaPill');
-  if (et) et.textContent = d.eta ? `⏳ ${humanSecs(d.eta)}` : '⏳ —';
-  const cp = $('#countPill');
-  if (cp) cp.textContent = `${d.index || 0}/${d.count || LIVE.total || 0}`;
-  const nm = $('#liveName');
-  if (nm && d.name) nm.textContent = d.name;
-  const sub = $('#liveSub');
-  if (sub && d.stage) sub.textContent = `${d.stage} · ${d.name || ''}`;
+  if (d.speed !== undefined) {
+    const sp = $('#speedPill'); if (sp) sp.textContent = d.speed ? `⚡ ${humanBytes(d.speed)}/s` : '⚡ —';
+    if (d.speed) S.measuredSpeed = d.speed;
+  }
+  if (d.eta !== undefined) { const et = $('#etaPill'); if (et) et.textContent = d.eta != null ? `⏳ ${humanSecs(d.eta)}` : '⏳ —'; }
+  const cp = $('#countPill'); if (cp && d.count) cp.textContent = `${d.index || 0}/${d.count}`;
+  const nm = $('#liveName'); if (nm && d.name) nm.textContent = d.name;
+  const stage = {preparing:'Preparing destination folders', waiting:'Waiting to start', downloading:'Downloading to server', uploading:'Uploading to Google Drive', transferring:'Downloading and uploading at the same time', verifying:'Checking upload', done:'File uploaded', failed:'Transfer failed', paused:'Paused'};
+  const sub = $('#liveSub'); if (sub && d.stage) sub.textContent = stage[d.stage] || d.stage;
+  const caption = $('#stageCaption'); if (caption && d.stage) caption.textContent = d.detail || (d.stage === 'transferring' ? 'Both stages can run together; Drive progress updates when chunks are confirmed.' : stage[d.stage] || d.stage);
   const pill = $('#livePill');
-  if (pill) { pill.textContent = d.paused ? 'paused' : 'running';
-    pill.className = 'pill ' + (d.paused ? 'warn' : 'info'); }
-  if (d.drive_pct && d.item_id) {
-    const row = $(`.prow[data-item="${d.item_id}"] .fill`);
-    if (row) row.style.width = `${d.drive_pct}%`;
+  if (pill) { const paused = d.paused || d.status === 'paused'; pill.textContent = paused ? 'pause requested' : (d.status || 'running'); pill.className = 'pill ' + (paused ? 'warn' : 'info'); }
+  if (d.tg_pct !== undefined) {
+    const first = Math.max(0,Math.min(100,Number(d.tg_pct)||0)); const up = Math.max(0,Math.min(100,Number(d.drive_pct)||0));
+    $('#downloadTitle').textContent = `${d.source_label || 'Telegram'} → server`;
+    $('#downloadText').textContent = `${first.toFixed(1)}%`; $('#downloadFill').style.width = `${first}%`;
+    $('#uploadText').textContent = `${up.toFixed(1)}%`; $('#uploadFill').style.width = `${up}%`;
+    $('#downloadBytes').textContent = `${humanBytes(d.tg_done || 0)} / ${humanBytes(d.total || 0)}`;
+    $('#uploadBytes').textContent = `${humanBytes(d.drive_done || 0)} / ${humanBytes(d.total || 0)}`;
+  }
+  if (d.drive_pct !== undefined && d.item_id) {
+    const row = $(`.prow[data-item="${d.item_id}"] .fill`); if (row) row.style.width = `${d.drive_pct}%`;
   }
 }
 

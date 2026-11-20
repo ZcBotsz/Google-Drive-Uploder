@@ -120,8 +120,8 @@ class Worker:
             try:
                 await asyncio.sleep(20)
                 for job_id, st in list(self.hub.current.items()):
-                    if st.stage in ("uploading", "downloading") and not st.paused:
-                        last = max((t for t, _ in st.meter.samples), default=st.started)
+                    if st.stage in ("uploading", "downloading", "transferring") and not st.paused:
+                        last = max((t for t, _ in (st.meter.samples + st.drive_meter.samples)), default=st.started_monotonic)
                         if time.monotonic() - last > self.cfg.stall_seconds:
                             log.warning("job %s stalled — cancelling the task", job_id)
                             ev = self._cancel_flags.get(job_id)
@@ -242,6 +242,9 @@ class Worker:
                 await self._tell_failure(job_id, e)
                 self.hub.finish(job_id)
             finally:
+                current = self.hub.get(job_id)
+                if current:
+                    current.finished = True
                 await self._reconcile(job_id)
 
     async def _tell_failure(self, job_id: str, err: Exception) -> None:
@@ -326,20 +329,37 @@ class Worker:
         # count instead of only reporting it.
         reasons: list[tuple[str, str]] = []
 
+        # Publish preparation before Drive folder creation and first byte.
+        preparation = ProgressState(job_id=job_id, user_id=user_id, name="Preparing job", count=len(items_all),
+                                    overall_bytes_done=base_done, overall_bytes_total=total_bytes,
+                                    stage="preparing", detail="Checking destination and preparing folders")
+        self.hub.put(preparation)
+        prep_anim = None
+        if msg_id:
+            from .animate import start_for
+            prep_anim = start_for(self, preparation, chat_id, msg_id)
         async with self.sem_for(user_id):
-            # Materialize the approved tree, including empty folders. Resolver
-            # reuses same-named Drive folders on retry and caches per job.
-            split = (job.get("destination") or {}).get("split") or {}
-            if split.get("mode") == "tree":
-                client = await self.accounts.client(user_id)
-                resolver = self._resolvers.get(job_id)
-                if resolver is None:
-                    resolver = self._resolvers[job_id] = groups.FolderResolver(
-                        client, (job.get("destination") or {}).get("folder_id") or "root")
-                for chain in split.get("folders") or []:
-                    if self._stopping or self._cancel_flags.setdefault(job_id, asyncio.Event()).is_set():
-                        return
-                    await resolver.resolve(chain)
+            try:
+                # Materialize the approved tree, including empty folders. Resolver
+                # reuses same-named Drive folders on retry and caches per job.
+                split = (job.get("destination") or {}).get("split") or {}
+                if split.get("mode") == "tree":
+                    client = await self.accounts.client(user_id)
+                    resolver = self._resolvers.get(job_id)
+                    if resolver is None:
+                        resolver = self._resolvers[job_id] = groups.FolderResolver(
+                            client, (job.get("destination") or {}).get("folder_id") or "root")
+                    folder_chains = split.get("folders") or []
+                    for number, chain in enumerate(folder_chains, 1):
+                        preparation.detail = f"Preparing folder {number}/{len(folder_chains)}"
+                        self.hub.put(preparation)
+                        if self._stopping or self._cancel_flags.setdefault(job_id, asyncio.Event()).is_set():
+                            return
+                        await resolver.resolve(chain)
+            finally:
+                preparation.finished = True
+                if prep_anim:
+                    await prep_anim.stop()
             while True:
                 if self._stopping:
                     return
@@ -368,6 +388,10 @@ class Worker:
                 if fresh and fresh["status"] == "cancelled":
                     return
                 try:
+                    # Exclude this item's persisted checkpoint from the base;
+                    # its Drive bytes are added separately in the live state.
+                    totals = await repo.recompute_totals(self.db, job_id)
+                    base_done = max(0, int(totals["bytes_done"]) - (int(item.get("bytes_done") or 0) if item.get("state") in ("uploading", "verifying") else 0))
                     await self._process_item(job, item, totals, base_done,
                                              chat_id=chat_id, msg_id=msg_id)
                 except Cancelled:
@@ -411,10 +435,12 @@ class Worker:
         if links:
             text += "\n\n" + links[:3500]
         text = _emoji.apply(text, self.cfg, await repo.get_global(self.db))
-        await self._say(chat_id, text)
+        edited = False
         if msg_id:
             from ..tg.ratelimit import safe_edit
-            await safe_edit(self.bot, chat_id, msg_id, text, gate=self.fg, force=True)
+            edited = await safe_edit(self.bot, chat_id, msg_id, text, gate=self.fg, force=True)
+        if not edited:
+            await self._say(chat_id, text)
         self.hub.finish(job_id)
 
     async def _record_job_event(self, title: str, job: dict, item: dict, detail: str) -> None:
@@ -494,15 +520,27 @@ class Worker:
         count = len(items)
         index = item["seq_index"]
 
-        state = ProgressState(job_id=job_id, item_id=item["id"],
+        destination = job.get("destination") or {}
+        split = destination.get("split") or {}
+        folder_label = destination.get("path", "My Drive")
+        if split.get("mode") == "tree":
+            parts = (split.get("plan") or {}).get(item["id"], [])
+            folder_label = " / ".join([folder_label, *parts])
+        elif split.get("mode") == "selected":
+            folder_id = (split.get("plan") or {}).get(item["id"], "")
+            folder_label = (split.get("destinations") or {}).get(folder_id, folder_label)
+        state = ProgressState(job_id=job_id, user_id=user_id, item_id=item["id"],
                               name=item["final_name"] or tg.get("name", ""),
-                              folder=(job.get("destination") or {}).get("path", "My Drive"),
+                              folder=folder_label,
                               index=index, count=count, total=size,
                               overall_bytes_done=base_done, overall_bytes_total=totals["bytes"],
+                              source_label="Browser" if tg.get("source_path") else ("Link" if tg.get("url") else "Telegram"),
                               cancel=self._cancel_flags.setdefault(job_id, asyncio.Event()))
+        state.drive_done = max(0, int(item.get("bytes_done") or 0))
         self.hub.put(state)
         if tg.get("source_path"):
             state.on_tg(size, size)
+            state.stage = "waiting"
             self.hub.put(state)
         # The card used to change only at the start and end of a file, so on a
         # small file the user saw one frozen frame. This redraws it while the
@@ -522,6 +560,7 @@ class Worker:
 
         # A link job carries its source in the item instead of a Telegram file.
         if (tg.get("url") or "").strip():
+            state.streaming = True
             try:
                 drive_info = await upload_from_url(self, job, item, state)
             finally:
@@ -534,44 +573,42 @@ class Worker:
             await self._record_uploaded(job, item, drive_info, state.total)
             return
 
-        for attempt in range(1, 4):
-            try:
-                if use_disk:
-                    path = await self._download_to_disk(item, state)
-                    drive_info = await self._upload_from_disk(job, item, path, state)
-                else:
-                    drive_info = await self._upload_streamed(job, item, state)
-                break
-            except SessionGone:
-                if attempt >= 3:
+        try:
+            for attempt in range(1, 4):
+                try:
+                    if use_disk:
+                        path = await self._download_to_disk(item, state)
+                        drive_info = await self._upload_from_disk(job, item, path, state)
+                    else:
+                        state.streaming = True
+                        state.stage = "downloading"
+                        self.hub.put(state)
+                        drive_info = await self._upload_streamed(job, item, state)
+                    break
+                except SessionGone:
+                    if attempt >= 3:
+                        raise
+                    log.info("session gone for %s — new session", item["id"])
+                    await repo.set_item(self.db, item["id"], drive={})
+                except NetworkError:
+                    if attempt >= 3:
+                        raise
+                    state.note_retry()
+                    if self.fg:
+                        pass
+                    await asyncio.sleep(min(20, 2 ** attempt))
+                    st = await repo.get_item(self.db, item["id"])
+                    session = (st or {}).get("drive") or {}
+                    log.info("retrying %s (attempt %s) from %s", item["id"], attempt, session.get("committed"))
+                except StorageQuota:
                     raise
-                log.info("session gone for %s — new session", item["id"])
-                await repo.set_item(self.db, item["id"], drive={})
-            except NetworkError:
-                if attempt >= 3:
-                    raise
-                state.note_retry()
-                if self.fg:
-                    pass
-                await asyncio.sleep(min(20, 2 ** attempt))
-                st = await repo.get_item(self.db, item["id"])
-                session = (st or {}).get("drive") or {}
-                log.info("retrying %s (attempt %s) from %s", item["id"], attempt, session.get("committed"))
-            except StorageQuota:
-                raise
-            except BaseException:
-                if anim:
-                    state.finished = True
-                    await anim.stop()
-                raise
-        else:
-            raise DriveError("upload did not complete")
+            else:
+                raise DriveError("upload did not complete")
 
-        if anim:
-            state.stage = "done"
+        finally:
             state.finished = True
-            await anim.final()
-            await anim.stop()
+            if anim:
+                await anim.stop()
         await repo.set_item(self.db, item["id"], state="done", finished_at=time.time(),
                             bytes_done=size, drive=drive_info, error="")
         await repo.add_quota(self.db, user_id, size, 1)
@@ -588,8 +625,11 @@ class Worker:
                                  elapsed=state.elapsed, eta=0, retries=state.retries,
                                  chunk_mb=cfg.chunk_bytes // 1024 // 1024,
                                  overall_pct=min(100, fresh["bytes_done"] * 100.0 / max(1, fresh["bytes"])),
-                                 style=cfg.progress_style)
-            await safe_edit(self.bot, chat_id, msg_id, text, gate=self.fg, pct=100, force=True)
+                                 style=cfg.progress_style, source_label=state.source_label,
+                                 tg_done=state.tg_done, drive_done=size, stage_label="FILE UPLOADED")
+            from .animate import progress_markup
+            await safe_edit(self.bot, chat_id, msg_id, text, reply_markup=progress_markup(state, cfg, chat_id),
+                            gate=self.fg, pct=100, force=True)
 
     def _checkpoint(self, item_id: str, raw, holder: dict, state: ProgressState | None = None):
         """Persist the resumable session URI + committed offset as it moves.
@@ -627,9 +667,12 @@ class Worker:
         safe = "".join(c for c in (tg.get("name") or "file") if c.isalnum() or c in "._- ")[:80]
         path = Path(self.cfg.download_dir) / f"{item['id']}_{safe}"
         if path.exists() and path.stat().st_size == int(tg.get("size") or 0):
+            state.on_tg(int(tg.get("size") or 0), int(tg.get("size") or 0))
+            self.hub.put(state)
             return path
         # Publish every byte checkpoint to both Telegram animation and Studio SSE.
         state.stage = "downloading"
+        self.hub.put(state)
         async def report(done: int, total: int) -> None:
             state.on_tg(done, total)
             self.hub.put(state)
@@ -677,6 +720,8 @@ class Worker:
     async def _upload_from_disk(self, job: dict, item: dict, path: Path,
                                 state: ProgressState) -> dict:
         naming = NamingOptions.from_dict(job.get("naming") or {})
+        state.stage = "uploading"
+        self.hub.put(state)
         client = await self.accounts.client(job["user_id"])
         dst = await self._folder_for(job, item, client)
         await repo.set_item(self.db, item["id"], state="uploading")

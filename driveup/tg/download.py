@@ -112,14 +112,14 @@ async def download_to_file(
     # Even better, when the local server put the bytes on a disk we can reach,
     # just read them — no HTTP copy through the same box.
     if os.path.isabs(file_path) and os.path.exists(file_path):
-        if progress:
-            out = progress(total or os.path.getsize(file_path), total)
-            if hasattr(out, "__await__"):
-                await out
         try:
             os.replace(file_path, path)      # same filesystem: atomic move
         except OSError:
             shutil.move(file_path, path)     # different mount: copy + unlink
+        if progress:
+            out = progress(path.stat().st_size, total or path.stat().st_size)
+            if hasattr(out, "__await__"):
+                await out
         return {"path": str(path), "size": path.stat().st_size,
                 "file_path": url_path}
 

@@ -585,16 +585,19 @@ async def cb_start(call: CallbackQuery, **data):
                           status_message={"chat_id": call.message.chat.id,
                                           "message_id": call.message.message_id})
     app.draft_jobs.pop(job["user_id"], None)
-    app.worker.spawn(job["id"])
     totals = await repo.recompute_totals(app.db, job["id"])
-    state = app.worker.hub.get(job["id"])
     text = progress_card(index=1, count=len(items), name=items[0]["final_name"],
                          folder=(job.get("destination") or {}).get("path", "My Drive"),
                          tg_pct=0, drive_pct=0, done=0, total=totals["bytes"],
                          overall_pct=0, chunk_mb=app.cfg.chunk_bytes // 1024 // 1024,
                          style=app.cfg.progress_style)
-    await call.message.edit_text(text, reply_markup=progress_kb(job["id"],
-                                                              studio_url=app.studio_url(job["id"], job["user_id"])))
+    try:
+        await call.message.edit_text(text, reply_markup=progress_kb(job["id"],
+                                                                  studio_url=app.studio_url(job["id"], job["user_id"])))
+    finally:
+        # Start only after the initial edit, or a quick job can finish and have
+        # its summary overwritten by this stale initial progress card.
+        app.worker.spawn(job["id"])
     await call.answer(t("job_ready", lang, files=len(items), size=human_bytes(totals["bytes"]),
                         dest="…").split("\n")[0])
     await app.log_event("#UploadStart", {"job": job["id"], "files": len(items)})

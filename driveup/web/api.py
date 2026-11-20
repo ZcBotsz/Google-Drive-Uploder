@@ -617,9 +617,13 @@ async def api_events(request: Request, job_id: str, user=Depends(session_user)):
                 if await request.is_disconnected():
                     break
                 try:
-                    payload = await asyncio.wait_for(queue.get(), timeout=15)
+                    payload = await asyncio.wait_for(queue.get(), timeout=5)
                 except asyncio.TimeoutError:
-                    yield ": ping\n\n"
+                    current = st.worker.hub.get(job_id)
+                    if current:
+                        yield f"data: {json.dumps(current.snapshot())}\n\n"
+                    else:
+                        yield ": ping\n\n"
                     continue
                 yield f"data: {json.dumps(payload)}\n\n"
                 if payload.get("stage") == "job-finished":
