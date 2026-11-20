@@ -336,7 +336,10 @@ def dedupe_job_names(names: List[str], items: List[dict], job: dict, policy: str
         return dedupe_names(names, policy)
     buckets = {}
     for i, item in enumerate(items):
-        key = tuple((split.get("plan") or {}).get(item["id"], []))
+        fid = (split.get("existing_plan") or {}).get(item["id"])
+        root = (job.get("destination") or {}).get("folder_id") or "root"
+        key = (("\x00existing", fid) if fid and fid != root else
+               tuple((split.get("plan") or {}).get(item["id"], [])))
         buckets.setdefault(key, []).append(i)
     result = {}
     for indexes in buckets.values():

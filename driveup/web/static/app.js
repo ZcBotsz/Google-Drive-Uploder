@@ -6,11 +6,14 @@ function startNewTransfer(files) {
   S.files = [];
   S.folder = { id: 'root', path: 'My Drive' };
   S.selected = 'root';
+  S.pickedDriveName = 'My Drive';
   S.split = null;
   S.folderGroups = [];
   S.fileRoutes = {};
   S.manualFolders = [];
   S.manualRoutes = {};
+  S.manualExistingFolders = {};
+  S.manualExistingRoutes = {};
   S.step = 'files';
   history.replaceState(null, '', '/studio');
   render();

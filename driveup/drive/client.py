@@ -12,7 +12,7 @@ from .upload import ResumableUploader
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
 FIELDS_FILE = "id,name,mimeType,size,webViewLink,parents,createdTime,modifiedTime,md5Checksum"
-FIELDS_LIST = f"nextPageToken,files({FIELDS_FILE})"
+FIELDS_LIST = f"nextPageToken,files({FIELDS_FILE},capabilities(canAddChildren))"
 
 
 class DriveClient:
@@ -98,6 +98,18 @@ class DriveClient:
                            page_size: int = 100) -> dict:
         return await self.list_children(parent, page_token=page_token, page_size=page_size,
                                         q_extra=f"mimeType='{FOLDER_MIME}'")
+
+    async def shared_folders(self, *, page_token: str = "", page_size: int = 100) -> dict:
+        """Folders in the connected user's Shared with me collection, within the granted scope."""
+        params = {"q": f"sharedWithMe = true and trashed = false and mimeType = '{FOLDER_MIME}'",
+                  "pageSize": str(min(1000, max(1, page_size))),
+                  "fields": "nextPageToken,files(id,name,mimeType,capabilities(canAddChildren))",
+                  "orderBy": "name", "supportsAllDrives": "true",
+                  "includeItemsFromAllDrives": "true", "corpora": "user"}
+        if page_token:
+            params["pageToken"] = page_token
+        data = await self._call("GET", f"{self.API}/files", params=params)
+        return {"files": data.get("files", []), "next": data.get("nextPageToken", "")}
 
     async def search(self, term: str, *, folders_only: bool = False,
                      page_size: int = 50) -> List[dict]:

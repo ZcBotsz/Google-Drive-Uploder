@@ -819,3 +819,64 @@ async def test_manual_tree_routes_validation_and_worker(web):
     assert (await web['worker']._folder_for(job, items[3], drive))['folder_id'] == nested['folder_id']
     await login(web, 56)
     assert (await patch(folders, plan)).status_code == 404
+
+async def test_shared_with_me_folders_are_paginated_and_session_protected(web):
+    assert (await web['client'].get('/api/drive/shared-folders')).status_code == 401
+    c = await login(web)
+    assert (await c.get('/api/drive/shared-folders')).status_code == 409
+    await repo.save_drive_account(web['db'], 55, email='shared@example.test',
+        enc_refresh=TokenCipher(web['cfg'].fernet_key()).enc('1//r'),
+        access='ya29.fake', expiry=9e12, scope='drive', scope_mode='full')
+    private = web['fd'].add_folder('Private folder')
+    ids = []
+    for i in range(105):
+        fid = web['fd'].add_folder(f'Shared {i:03}')
+        web['fd'].files[fid]['sharedWithMe'] = True
+        web['fd'].files[fid]['capabilities'] = {'canAddChildren': i != 0}
+        ids.append(fid)
+    first = await c.get('/api/drive/shared-folders')
+    assert first.status_code == 200
+    body = first.json()
+    assert len(body['folders']) == 100 and body['next']
+    assert private not in {f['id'] for f in body['folders']}
+    assert body['folders'][0]['capabilities']['canAddChildren'] is False
+    second = await c.get('/api/drive/shared-folders', params={'page': body['next']})
+    assert len(second.json()['folders']) == 5 and not second.json()['next']
+    assert {f['id'] for f in body['folders'] + second.json()['folders']} == set(ids)
+    await login(web, 56)
+    assert (await c.get('/api/drive/shared-folders')).status_code == 409
+
+async def test_tree_can_route_to_existing_private_and_shared_folders(web):
+    c = await login(web)
+    jid = await make_job(web, files=tuple((f'video{i}.mp4',b'x') for i in range(3)))
+    await repo.save_drive_account(web['db'], 55, email='tree@example.test',
+        enc_refresh=TokenCipher(web['cfg'].fernet_key()).enc('1//r'),
+        access='ya29.fake', expiry=9e12, scope='drive', scope_mode='full')
+    items = await repo.items_of(web['db'],jid)
+    shared = web['fd'].add_folder('Shared folder')
+    my = web['fd'].add_folder('My folder')
+    web['fd'].files[shared]['sharedWithMe'] = True
+    web['fd'].files[shared]['capabilities'] = {'canAddChildren':True}
+    plan = {i['id']:[] for i in items}
+    routes = {items[0]['id']:shared, items[1]['id']:my}
+    async def patch(folders, assignments, file_plan=plan):
+        return await c.patch(f'/api/jobs/{jid}',json={'destination':{'id':'root','split':{
+            'mode':'tree','folders':[], 'plan':file_plan, 'existing_folders':folders,'existing_plan':assignments}}})
+    assert (await patch({shared:'Shared'}, {**routes, 'foreign':shared})).status_code == 422
+    assert (await patch({shared:'Shared'}, {items[0]['id']:'unknown'})).status_code == 422
+    assert (await patch({'unknown':'Missing'}, {items[0]['id']:'unknown'})).status_code == 422
+    web['fd'].files[shared]['capabilities']['canAddChildren'] = False
+    assert (await patch({shared:'Shared'}, {items[0]['id']:shared})).status_code == 422
+    web['fd'].files[shared]['capabilities']['canAddChildren'] = True
+    response = await patch({shared:'Fake label', my:'Another label'}, routes)
+    assert response.status_code == 200, response.text
+    split=response.json()['destination']['split']
+    assert split['existing_plan']==routes
+    assert split['existing_folders']=={shared:'Shared folder',my:'My folder'}
+    drive = await web['accounts'].client(55)
+    job = await repo.get_job(web['db'],jid)
+    assert (await web['worker']._folder_for(job,items[0],drive))['folder_id']==shared
+    assert (await web['worker']._folder_for(job,items[1],drive))['folder_id']==my
+    assert (await web['worker']._folder_for(job,items[2],drive))['folder_id']=='root'
+    await login(web,56)
+    assert (await patch({shared:'Shared'}, {items[0]['id']:shared})).status_code == 404

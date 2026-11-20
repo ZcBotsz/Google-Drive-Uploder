@@ -12,7 +12,9 @@ function currentSplit() {
     const folders = (S.manualFolders || []).map(path => [...path]);
     const plan = {};
     for (const f of S.files) plan[f.id] = [...((S.manualRoutes || {})[f.id] || [])];
-    return S.files.length ? {mode, folders, plan} : null;
+    const existing_plan = {}; const existing_folders = {...(S.manualExistingFolders || {})};
+    for (const f of S.files) if (S.manualExistingRoutes?.[f.id]) existing_plan[f.id] = S.manualExistingRoutes[f.id];
+    return S.files.length ? {mode, folders, plan, existing_plan, existing_folders} : null;
   }
   if (mode === 'selected') {
     const plan = {}; const destinations = {};
@@ -311,7 +313,8 @@ async function viewReview(view) {
   const manualReview = S.split?.mode === 'tree' ? `
     <details open class="route-review"><summary>Folder tree (${(S.split.folders || []).length} folders)</summary>
       <ul>${(S.split.folders || []).map(path => `<li>📁 ${esc(path.join(' / '))}</li>`).join('')}
-      ${S.files.map(f => `<li>📄 ${esc(f.name)} → ${esc((S.split.plan[f.id] || []).join(' / ') || '(parent folder)')}</li>`).join('')}</ul></details>` : '';
+      ${Object.values(S.split.existing_folders || {}).map(name => `<li>📁 Existing: ${esc(name)}</li>`).join('')}
+      ${S.files.map(f => { const id = S.split.existing_plan?.[f.id]; const name = id ? (S.split.existing_folders?.[id] || id) : ((S.split.plan[f.id] || []).join(' / ') || '(parent folder)'); return `<li>📄 ${esc(f.name)} → ${esc(name)}</li>`; }).join('')}</ul></details>` : '';
   const c = el('div', 'card');
   c.innerHTML = `
     <h2>Review</h2>

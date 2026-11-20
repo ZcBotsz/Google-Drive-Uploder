@@ -371,6 +371,8 @@ async def api_patch_job(request: Request, job_id: str, body: dict = Body(...),
                         return fail("bad_split", "A destination is not a writable Drive folder.", 422)
                     destinations[fid] = str(folder.get("name") or "Folder")[:200]
             tree_folders = []
+            existing_plan = {}
+            existing_folders = {}
             if mode == "tree":
                 items = await repo.items_of(st.db, job_id)
                 if not items or set(route_plan) != {item["id"] for item in items}:
@@ -407,6 +409,30 @@ async def api_patch_job(request: Request, job_id: str, body: dict = Body(...),
                     if (folder.get("mimeType") != "application/vnd.google-apps.folder"
                             or folder.get("trashed") or folder.get("capabilities", {}).get("canAddChildren") is False):
                         return fail("bad_split", "The parent destination is not a writable folder.", 422)
+                raw_existing = split.get("existing_folders") or {}
+                existing_plan = split.get("existing_plan") or {}
+                if not isinstance(raw_existing, dict) or len(raw_existing) > 100 or not isinstance(existing_plan, dict):
+                    return fail("bad_split", "Invalid existing folder assignments.", 422)
+                if not set(existing_plan).issubset(set(route_plan)):
+                    return fail("bad_split", "An assignment is not a file in this job.", 422)
+                if any(not isinstance(fid, str) or not fid or len(fid) > 256 for fid in raw_existing):
+                    return fail("bad_split", "Invalid existing folder ID.", 422)
+                if any(not isinstance(fid, str) or fid not in raw_existing for fid in existing_plan.values()):
+                    return fail("bad_split", "A file points to a missing existing folder.", 422)
+                if any(route_plan[item] for item in existing_plan):
+                    return fail("bad_split", "A file cannot have both a new and existing folder destination.", 422)
+                for fid in raw_existing:
+                    if fid == "root":
+                        existing_folders[fid] = "My Drive"
+                        continue
+                    try:
+                        folder = await client.get(fid)
+                    except DriveError:
+                        return fail("bad_split", "An existing folder is not accessible in your connected Drive.", 422)
+                    if (folder.get("mimeType") != "application/vnd.google-apps.folder"
+                            or folder.get("trashed") or folder.get("capabilities", {}).get("canAddChildren") is False):
+                        return fail("bad_split", "An existing folder is not writable by your Google account.", 422)
+                    existing_folders[fid] = str(folder.get("name") or "Folder")[:200]
                 tree_folders = sorted(raw_folders, key=len)
             new_dest["split"] = {
                 "mode": mode,
@@ -417,6 +443,8 @@ async def api_patch_job(request: Request, job_id: str, body: dict = Body(...),
                 "groups": groups if mode == "batches" else [],
                 "destinations": destinations if mode == "selected" else {},
                 "folders": tree_folders if mode == "tree" else [],
+                "existing_plan": existing_plan if mode == "tree" else {},
+                "existing_folders": existing_folders if mode == "tree" else {},
             }
         patch["destination"] = new_dest
     if "naming" in body:
@@ -472,7 +500,10 @@ async def api_preview_names(request: Request, job_id: str, body: dict = Body(def
     split = (job.get("destination") or {}).get("split") or {}
     if split.get("mode") == "tree":
         for row, item in zip(payload, items):
-            row["folder_key"] = (split.get("plan") or {}).get(item["id"], [])
+            fid = (split.get("existing_plan") or {}).get(item["id"])
+            root = (job.get("destination") or {}).get("folder_id") or "root"
+            row["folder_key"] = (["\x00existing", fid] if fid and fid != root
+                                 else (split.get("plan") or {}).get(item["id"], []))
     rows = naming_mod.preview_rows(payload, opt, start=opt.start)
     return ok(rows=rows)
 
@@ -673,6 +704,19 @@ async def api_children(request: Request, parent: str = "root", page: str = "",
     try:
         data = await client.list_folders(parent, page_token=page)
         return ok(parent=parent, next=data["next"], folders=data["files"])
+    except DriveError as e:
+        return fail(e.code, str(e), 502)
+
+
+@router.get("/api/drive/shared-folders")
+async def api_shared_folders(request: Request, page: str = Query("", max_length=2048),
+                             user=Depends(session_user)):
+    client = await _client(request, user)
+    if client is None:
+        return fail("not_connected", "Connect your Google Drive account first.", 409)
+    try:
+        data = await client.shared_folders(page_token=page)
+        return ok(next=data["next"], folders=data["files"])
     except DriveError as e:
         return fail(e.code, str(e), 502)
 

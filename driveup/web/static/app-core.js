@@ -94,9 +94,12 @@ function hydrate(job) {
     S.fileRoutes = {};
     S.manualFolders = S.split?.mode === 'tree' ? (S.split.folders || []).map(p => [...p]) : [];
     S.manualRoutes = S.split?.mode === 'tree' ? {...S.split.plan} : {};
+    S.manualExistingFolders = S.split?.mode === 'tree' ? {...S.split.existing_folders} : {};
+    S.manualExistingRoutes = S.split?.mode === 'tree' ? {...S.split.existing_plan} : {};
     if (S.split?.mode === 'selected') for (const [id, folder] of Object.entries(S.split.plan || {}))
       S.fileRoutes[id] = {id: folder, name: S.split.destinations?.[folder] || folder};
     S.selected = job.destination.folder_id;
+    S.pickedDriveName = S.folder.path;
   }
   if (job.naming) Object.assign(S.naming, job.naming);
   if (job.sequence_mode) S.sequence.mode = job.sequence_mode;
@@ -272,7 +275,8 @@ function renderBottom() {
   } else if (S.step === 'done') {
     const more = el('button', 'btn primary', '📤 Upload more');
     more.onclick = () => {
-      S.jobId = ''; S.files = []; S.folder = { id: 'root', path: 'My Drive' };
+      S.jobId = ''; S.files = []; S.folder = { id: 'root', path: 'My Drive' }; S.selected = 'root'; S.pickedDriveName = 'My Drive';
+      S.split = null; S.folderGroups = []; S.manualFolders = []; S.manualRoutes = {}; S.manualExistingFolders = {}; S.manualExistingRoutes = {}; S.fileRoutes = {};
       history.replaceState(null, '', '/studio');
       go('files');
     };
@@ -497,6 +501,7 @@ function viewFolder(view) {
       <input type="search" id="dsearch" placeholder="Search folders…" style="flex:1">
       <button class="btn sm" id="newFolderBtn">＋ New folder</button>
     </div>
+    <p class="hint" id="browseLocation" role="status">Browsing My Drive</p>
     <div class="picker">
       <div class="tree" id="tree"><div class="skel-row skeleton"></div><div class="skel-row skeleton"></div></div>
       <div class="col">
@@ -504,6 +509,7 @@ function viewFolder(view) {
         <div class="row tight">
           <button class="btn sm" id="upBtn">↑ Parent</button>
           <button class="btn sm" id="rootBtn">⌂ My Drive</button>
+          <button class="btn sm" id="sharedBtn">👥 Shared with me</button>
           <button class="btn sm" id="copyId">⧉ Copy folder ID</button>
         </div>
         <div class="hint" id="folderHint">Tap a folder to select it, or Open to browse inside.</div>
@@ -544,7 +550,9 @@ function viewFolder(view) {
     </div>
     <section id="manualTree" class="manual-tree" hidden>
       <h3>Build your folder tree</h3>
-      <p class="hint">Everything starts in the selected parent folder. Choose a folder below, add subfolders, and move selected files into it. Folders are created in Drive only after you start. Existing folders with matching names may be reused.</p>
+      <p class="hint">Select an existing My Drive or shared folder above, then tap Add selected Drive folder below. Select it in this list, check files, and tap Move selected here. Or create planned subfolders under the original parent. Existing folders are not moved or modified by the organizer.</p>
+      <button type="button" class="btn primary" id="manualUsePicked">＋ Add selected Drive folder to tree</button>
+      <p class="hint" id="manualPicked"></p>
       <div class="manual-layout"><div><div class="manual-actions"><button type="button" class="btn" id="manualAdd">＋ Folder</button><button type="button" class="btn" id="manualRename">Rename</button><select id="manualFolderTarget" aria-label="Move selected folder into"></select><button type="button" class="btn" id="manualMoveFolder">Move folder into…</button><button type="button" class="btn" id="manualDelete">Delete empty folder</button></div><div id="manualFolderList" class="manual-folders" aria-label="Folder tree"></div></div>
       <div><div class="route-toolbar"><input type="search" id="manualSearch" placeholder="Filter files" aria-label="Filter files"><button type="button" class="btn" id="manualAll">Select visible</button><button type="button" class="btn" id="manualClear">Clear</button><button type="button" class="btn primary" id="manualAssign">Move selected here</button></div><p id="manualStatus" role="status" aria-live="polite"></p><div id="manualFileList" class="route-files"></div></div></div>
       <div class="manual-actions"><button type="button" class="btn" id="manualSave">Save tree draft</button><span class="hint">Save before leaving or refreshing this page.</span></div>
@@ -553,11 +561,16 @@ function viewFolder(view) {
   view.appendChild(card);
 
   // A single-folder browser avoids rebuilding an entire nested tree on each tap.
-  let browseId = S.selected || 'root', browseName = S.folder.path || 'My Drive';
+  let browseId = S.selected || 'root', browseName = S.pickedDriveName || S.folder.path || 'My Drive';
+  const SHARED_VIEW = '__shared_with_me_view__';
+  let navigation = [];
   let generation = 0, nextPage = '', currentFolders = [];
   const tree = $('#tree');
+  let pickedDriveName = S.pickedDriveName || S.folder.path || 'My Drive';
   const showFolder = (id, name) => {
-    S.selected = id; S.folder = {id, path: name};
+    S.selected = id; pickedDriveName = name; S.pickedDriveName = name;
+    if ($('#splitMode')?.value !== 'tree') S.folder = {id, path: name};
+    if ($('#manualPicked')) $('#manualPicked').textContent = `Selected Drive folder: ${name} · Tree parent: ${S.folder.path}`;
     $('#crumbs').textContent = name;
     $('#folderHint').textContent = `Selected destination: ${name}`;
     if ($('#routeAssign')) $('#routeAssign').textContent = `Assign selected to ${name}`;
@@ -565,15 +578,22 @@ function viewFolder(view) {
   };
   const drawFolders = () => {
     tree.innerHTML = '';
-    if (!currentFolders.length) tree.appendChild(el('p', 'hint', 'No folders here. Create one or go back.'));
+    if (!currentFolders.length) {
+      const message = browseId === SHARED_VIEW
+        ? 'No shared folders are visible to this app. Check the connected Google account and app permissions. Some folders may require additional Google authorization.'
+        : 'No folders here. Create one or go back.';
+      const empty = el('p', 'hint'); empty.textContent = message; tree.appendChild(empty);
+    }
     currentFolders.forEach(f => {
       const row = el('div', 'folder-browser-row' + (S.selected === f.id ? ' selected' : ''));
       row.dataset.folderId = f.id;
       const choose = document.createElement('button'); choose.type = 'button'; choose.className = 'folder-pick';
-      choose.textContent = '📁 ' + f.name; choose.onclick = () => showFolder(f.id, f.name);
+      const readOnly = f.capabilities?.canAddChildren === false;
+      choose.textContent = '📁 ' + f.name + (readOnly ? ' · view only' : '');
+      choose.onclick = () => readOnly ? toast('This account cannot add files to this folder. Ask the owner for Editor access.', 'err') : showFolder(f.id, f.name);
       const open = document.createElement('button'); open.type = 'button'; open.className = 'btn folder-open';
       open.textContent = 'Open ›'; open.setAttribute('aria-label', 'Open ' + f.name);
-      open.onclick = () => { showFolder(f.id, f.name); browse(f.id, f.name); };
+      open.onclick = () => { navigation.push({id:browseId, name:browseName}); if (!readOnly) showFolder(f.id, f.name); browse(f.id, f.name); };
       row.append(choose, open); tree.appendChild(row);
     });
     if (nextPage) {
@@ -583,9 +603,11 @@ function viewFolder(view) {
   };
   const browse = async (id, name, page = '') => {
     const token = ++generation;
-    if (!page) { browseId = id; browseName = name; tree.innerHTML = '<p class="hint">Loading folders…</p>'; }
+    if (!page) { browseId = id; browseName = name; $('#browseLocation').textContent = `Browsing: ${name}`; tree.innerHTML = '<p class="hint">Loading folders…</p>'; }
     try {
-      const data = await loadTree(id, page);
+      const data = id === SHARED_VIEW
+        ? await api(`/api/drive/shared-folders?page=${encodeURIComponent(page)}`)
+        : await loadTree(id, page);
       if (token !== generation || !tree.isConnected) return;
       currentFolders = page ? currentFolders.concat(data.folders) : data.folders;
       nextPage = data.next || ''; drawFolders();
@@ -595,10 +617,11 @@ function viewFolder(view) {
       const retry = el('button', 'btn', 'Retry'); retry.onclick = () => browse(id, name, page); tree.appendChild(retry);
     }
   };
-  showFolder(S.selected || 'root', S.folder.path || 'My Drive');
-  browse(S.selected || 'root', S.folder.path || 'My Drive');
+  showFolder(S.selected || 'root', pickedDriveName);
+  browse(S.selected || 'root', pickedDriveName);
   const searchFolders = debounce(async (q, token) => {
     if (!q) { browse(browseId, browseName); return; }
+    $('#browseLocation').textContent = 'Searching accessible folders';
     tree.textContent = 'Searching…';
     try {
       const res = await api(`/api/drive/search?q=${encodeURIComponent(q)}`);
@@ -608,21 +631,33 @@ function viewFolder(view) {
   }, 320);
   $('#dsearch').oninput = (ev) => { const token = ++generation; searchFolders(ev.target.value.trim(), token); };
   $('#newFolderBtn').onclick = async () => {
-    const name = prompt('New folder name inside ' + S.folder.path);
+    const name = prompt('New folder name inside ' + pickedDriveName);
     if (!name || !name.trim()) return;
     const parent = S.selected;
     try {
       const res = await api('/api/drive/folders', {method:'POST', body:{name:name.trim(), parent}});
-      toast(`Created “${res.name}”`, 'ok'); showFolder(res.id, res.name); $('#dsearch').value = ''; browse(res.id, res.name);
+      toast(`Created “${res.name}”`, 'ok'); navigation.push({id: browseId, name: browseName}); showFolder(res.id, res.name); $('#dsearch').value = ''; browse(res.id, res.name);
     } catch (e) { toast(e.message, 'err'); }
   };
   $('#upBtn').onclick = async () => {
+    if (navigation.length) {
+      const previous = navigation.pop(); $('#dsearch').value = '';
+      if (previous.id !== SHARED_VIEW) showFolder(previous.id, previous.name);
+      else $('#folderHint').textContent = `Browsing Shared with me. Selected Drive folder: ${pickedDriveName}`;
+      browse(previous.id, previous.name); return;
+    }
+    if (browseId === SHARED_VIEW) return;
     try {
       const res = await api(`/api/drive/parent?child=${encodeURIComponent(browseId)}`);
       $('#dsearch').value = ''; showFolder(res.id, res.name); browse(res.id, res.name);
     } catch (e) { toast(e.message, 'err'); }
   };
-  $('#rootBtn').onclick = () => { $('#dsearch').value = ''; showFolder('root', 'My Drive'); browse('root', 'My Drive'); };
+  $('#rootBtn').onclick = () => { navigation = []; $('#dsearch').value = ''; showFolder('root', 'My Drive'); browse('root', 'My Drive'); };
+  $('#sharedBtn').onclick = () => {
+    navigation = []; $('#dsearch').value = '';
+    $('#folderHint').textContent = `Browsing Shared with me. Selected Drive folder: ${pickedDriveName}. Select a folder to change it.`;
+    browse(SHARED_VIEW, 'Shared with me');
+  };
   $('#copyId').onclick = async () => {
     try { await navigator.clipboard.writeText(S.selected); toast('Folder id copied', 'ok'); }
     catch (_) { toast(S.selected); }
@@ -670,7 +705,8 @@ function viewFolder(view) {
     $('#batchRoutePanel').style.display = batches ? '' : 'none';
     $('#selectedRoutes').hidden = saved.mode !== 'selected';
     $('#manualTree').hidden = saved.mode !== 'tree';
-    if (saved.mode === 'tree') drawManual();
+    if (saved.mode === 'tree') { $('#manualPicked').textContent = `Selected Drive folder: ${pickedDriveName} · Tree parent: ${S.folder.path}`; drawManual(); }
+    else if (S.selected !== S.folder.id) showFolder(S.selected, pickedDriveName);
     if (saved.mode === 'selected') drawRouteFiles();
     if (custom) {
       const r0 = (saved.rules || [])[0] || {};
@@ -766,10 +802,12 @@ function viewFolder(view) {
   };
   S.manualFolders = S.manualFolders || [];
   S.manualRoutes = S.manualRoutes || {};
-  let manualSelected = []; const manualChecked = new Set();
+  S.manualExistingFolders = S.manualExistingFolders || {};
+  S.manualExistingRoutes = S.manualExistingRoutes || {};
+  let manualSelected = [], manualSelectedExisting = ''; const manualChecked = new Set();
   const pathKey = p => JSON.stringify(p);
   const isPrefix = (a,b) => a.length <= b.length && a.every((v,i) => v === b[i]);
-  const manualName = () => manualSelected.length ? manualSelected.join(' / ') : '(parent folder)';
+  const manualName = () => manualSelectedExisting ? (S.manualExistingFolders[manualSelectedExisting] || manualSelectedExisting) : (manualSelected.length ? manualSelected.join(' / ') : '(parent folder)');
   const nameValid = n => n && n.length <= 80 && !/[\\/:*?"<>|\x00-\x1f]/.test(n) && n === n.trim() && !/^[.]|[.]$/.test(n) && !/\s{2}/.test(n);
   const duplicate = path => S.manualFolders.some(p => pathKey(p) === pathKey(path));
   const validNewName = raw => {
@@ -782,11 +820,19 @@ function viewFolder(view) {
     folderList.innerHTML = '';
     const paths = [[], ...S.manualFolders];
     for (const path of paths) {
-      const row = document.createElement('button'); row.type = 'button'; row.className = 'manual-folder' + (pathKey(path) === pathKey(manualSelected) ? ' active' : '');
+      const row = document.createElement('button'); row.type = 'button'; row.className = 'manual-folder' + (!manualSelectedExisting && pathKey(path) === pathKey(manualSelected) ? ' active' : '');
       row.style.paddingLeft = `${12 + Math.min(path.length, 12) * 15}px`;
-      const count = S.files.filter(f => pathKey(S.manualRoutes[f.id] || []) === pathKey(path)).length;
+      const count = S.files.filter(f => !S.manualExistingRoutes[f.id] && pathKey(S.manualRoutes[f.id] || []) === pathKey(path)).length;
       row.textContent = `${path.length ? '📁 ' + path[path.length-1] : '⌂ Parent folder'}  ·  ${count} files`;
-      row.onclick = () => { manualSelected = [...path]; drawManual(); };
+      row.onclick = () => { manualSelectedExisting = ''; manualSelected = [...path]; drawManual(); };
+      folderList.appendChild(row);
+    }
+    for (const [id, name] of Object.entries(S.manualExistingFolders)) {
+      const row = document.createElement('button'); row.type = 'button';
+      row.className = 'manual-folder' + (manualSelectedExisting === id ? ' active' : '');
+      const count = S.files.filter(f => S.manualExistingRoutes[f.id] === id).length;
+      row.textContent = `📁 Existing: ${name} · ${count} files`;
+      row.onclick = () => { manualSelectedExisting = id; manualSelected = []; drawManual(); };
       folderList.appendChild(row);
     }
     const target = $('#manualFolderTarget'); const previous = target.value; target.innerHTML = '';
@@ -801,14 +847,22 @@ function viewFolder(view) {
       const label = el('label','route-file'); const input = document.createElement('input'); input.type = 'checkbox'; input.checked = manualChecked.has(file.id);
       input.onchange = () => { input.checked ? manualChecked.add(file.id) : manualChecked.delete(file.id); manualStatus(); };
       const detail = el('span','route-file-detail'); const name = document.createElement('strong'); name.textContent = file.name || 'Unnamed file';
-      const dest = document.createElement('small'); dest.textContent = '→ ' + ((S.manualRoutes[file.id] || []).join(' / ') || '(parent folder)');
+      const dest = document.createElement('small'); dest.textContent = '→ ' + (S.manualExistingRoutes[file.id] ? (S.manualExistingFolders[S.manualExistingRoutes[file.id]] || 'Existing folder') : ((S.manualRoutes[file.id] || []).join(' / ') || '(parent folder)'));
       detail.append(name,dest); label.append(input,detail); fragment.appendChild(label);
     }
     list.appendChild(fragment); manualStatus();
   };
   const manualStatus = () => { $('#manualStatus').textContent = `${manualChecked.size} selected · ${S.files.length} files · destination: ${manualName()}`; };
   const sortTree = () => S.manualFolders.sort((a,b) => a.join('\u0000').localeCompare(b.join('\u0000'), undefined, {numeric:true}));
+  $('#manualUsePicked').onclick = () => {
+    if (!S.selected) return toast('Select a Drive folder above first.', 'err');
+    if (!S.manualExistingFolders[S.selected] && Object.keys(S.manualExistingFolders).length >= 100) return toast('Use at most 100 existing folders.', 'err');
+    S.manualExistingFolders[S.selected] = pickedDriveName;
+    manualSelectedExisting = S.selected; manualSelected = []; drawManual();
+    toast('Existing folder added to your tree.', 'ok');
+  };
   $('#manualAdd').onclick = () => {
+    if (manualSelectedExisting) return toast('To create a folder here, use New folder in the Drive browser above.', 'err');
     if (S.manualFolders.length >= 200 || manualSelected.length >= 12) return toast('Maximum 200 folders and 12 levels.', 'err');
     const raw = prompt('New folder inside ' + manualName()); if (raw === null) return;
     const n = validNewName(raw); if (!n) return; const path = [...manualSelected,n];
@@ -821,6 +875,7 @@ function viewFolder(view) {
     manualSelected = newPath; sortTree(); drawManual();
   };
   $('#manualRename').onclick = () => {
+    if (manualSelectedExisting) return toast('Existing Drive folders cannot be renamed here.', 'err');
     if (!manualSelected.length) return toast('Select a folder to rename.', 'err');
     const raw = prompt('Rename folder',manualSelected[manualSelected.length-1]); if (raw === null) return;
     const n = validNewName(raw); if (!n) return; const path = [...manualSelected.slice(0,-1), n];
@@ -828,6 +883,7 @@ function viewFolder(view) {
     rewritePaths(manualSelected,path);
   };
   $('#manualMoveFolder').onclick = () => {
+    if (manualSelectedExisting) return toast('Existing Drive folders are not moved by this organizer.', 'err');
     if (!manualSelected.length) return toast('Select a folder to move.', 'err');
     const parent = JSON.parse($('#manualFolderTarget').value); const path = [...parent, manualSelected[manualSelected.length-1]];
     const maxDepth = Math.max(...S.manualFolders.filter(p=>isPrefix(manualSelected,p)).map(p=>path.length+p.length-manualSelected.length));
@@ -836,6 +892,10 @@ function viewFolder(view) {
     rewritePaths(manualSelected,path);
   };
   $('#manualDelete').onclick = () => {
+    if (manualSelectedExisting) {
+      if (S.files.some(f => S.manualExistingRoutes[f.id] === manualSelectedExisting)) return toast('Move its files first.', 'err');
+      delete S.manualExistingFolders[manualSelectedExisting]; manualSelectedExisting = ''; drawManual(); return;
+    }
     if (!manualSelected.length) return toast('Select a folder to delete.', 'err');
     if (S.manualFolders.some(p => p.length > manualSelected.length && isPrefix(manualSelected,p)) || S.files.some(f => isPrefix(manualSelected,S.manualRoutes[f.id] || []))) return toast('Move its files and delete its subfolders first.', 'err');
     if (!confirm(`Remove ${manualName()} from this draft?`)) return;
@@ -844,7 +904,14 @@ function viewFolder(view) {
   $('#manualSearch').oninput = debounce(drawManual, 120);
   $('#manualAll').onclick = () => { const q = $('#manualSearch').value.toLocaleLowerCase(); S.files.filter(f => (f.name || '').toLocaleLowerCase().includes(q)).forEach(f => manualChecked.add(f.id)); drawManual(); };
   $('#manualClear').onclick = () => { manualChecked.clear(); drawManual(); };
-  $('#manualAssign').onclick = () => { if (!manualChecked.size) return toast('Select at least one file.', 'err'); for (const id of manualChecked) S.manualRoutes[id] = [...manualSelected]; manualChecked.clear(); drawManual(); };
+  $('#manualAssign').onclick = () => {
+    if (!manualChecked.size) return toast('Select at least one file.', 'err');
+    for (const id of manualChecked) {
+      if (manualSelectedExisting) { S.manualExistingRoutes[id] = manualSelectedExisting; S.manualRoutes[id] = []; }
+      else { delete S.manualExistingRoutes[id]; S.manualRoutes[id] = [...manualSelected]; }
+    }
+    manualChecked.clear(); drawManual();
+  };
   $('#manualSave').onclick = async () => {
     if (!S.jobId) return toast('Add files to create a job first.', 'err');
     const button = $('#manualSave'); button.disabled = true;

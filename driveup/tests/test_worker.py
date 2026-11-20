@@ -483,3 +483,45 @@ async def test_completion_falls_back_to_one_send_without_status_message(env):
     prefix = "Upload finished"
     sends = [m for m in bot.sent if m['chat_id'] == env['uid'] and prefix in m['text']]
     assert len(sends) == 1
+
+@pytest.mark.asyncio
+async def test_upload_and_manual_tree_inside_shared_folder(env):
+    shared = env['fd'].add_folder('Shared with me folder')
+    env['fd'].files[shared]['sharedWithMe'] = True
+    env['fd'].files[shared]['capabilities'] = {'canAddChildren': True}
+    job_id = await make_job(env, [('video.mp4', b'video-bytes'*20)], template='{original}.{ext}')
+    db, worker = env['db'], env['worker']
+    item = (await repo.items_of(db, job_id))[0]
+    dest = {'folder_id': shared, 'path': 'Shared with me folder', 'split': {
+        'mode':'tree', 'folders':[['Course'], ['Course', 'Chapter']],
+        'plan':{item['id']:['Course','Chapter']}}}
+    await repo.update_job(db,job_id, destination=dest, status='queued')
+    worker.spawn(job_id)
+    job = await wait_done(worker,job_id,db)
+    assert job['status']=='done'
+    records = {f['name']:f for f in env['fd'].files.values()}
+    assert records['Course']['parents']==[shared]
+    assert records['Chapter']['parents']==[records['Course']['id']]
+    assert records['video.mp4']['parents']==[records['Chapter']['id']]
+
+@pytest.mark.asyncio
+async def test_manual_tree_uploads_to_two_existing_folders_without_creating_new(env):
+    shared = env['fd'].add_folder('Shared')
+    mine = env['fd'].add_folder('Mine')
+    env['fd'].files[shared]['sharedWithMe'] = True
+    job_id = await make_job(env, [('a.mp4',b'a'*100),('b.mp4',b'b'*100),('c.mp4',b'c'*100)], template='{original}.{ext}')
+    db, worker = env['db'], env['worker']
+    items = await repo.items_of(db, job_id)
+    split = {'mode':'tree','folders':[], 'plan':{i['id']:[] for i in items},
+             'existing_plan':{items[0]['id']:shared,items[1]['id']:mine},
+             'existing_folders':{shared:'Shared',mine:'Mine'}}
+    await repo.update_job(db,job_id,destination={'folder_id':'root','path':'My Drive','split':split},status='queued')
+    worker.spawn(job_id)
+    job = await wait_done(worker,job_id,db)
+    assert job['status']=='done'
+    assert all(i['state']=='done' for i in await repo.items_of(db,job_id))
+    files = {f['name']:f for f in env['fd'].files.values()}
+    assert files['a.mp4']['parents']==[shared]
+    assert files['b.mp4']['parents']==[mine]
+    assert files['c.mp4']['parents']==['root']
+    assert not [call for call in env['fd'].calls if call[0]=='create']

@@ -524,8 +524,9 @@ class Worker:
         split = destination.get("split") or {}
         folder_label = destination.get("path", "My Drive")
         if split.get("mode") == "tree":
+            fid = (split.get("existing_plan") or {}).get(item["id"])
             parts = (split.get("plan") or {}).get(item["id"], [])
-            folder_label = " / ".join([folder_label, *parts])
+            folder_label = (split.get("existing_folders") or {}).get(fid, folder_label) if fid else " / ".join([folder_label, *parts])
         elif split.get("mode") == "selected":
             folder_id = (split.get("plan") or {}).get(item["id"], "")
             folder_label = (split.get("destinations") or {}).get(folder_id, folder_label)
@@ -691,6 +692,11 @@ class Worker:
         split = dst.get("split") or {}
         if not split or (split.get("mode") or "none") in ("none", "off", ""):
             return {"folder_id": root, "path": ""}
+        if split.get("mode") == "tree" and item["id"] in (split.get("existing_plan") or {}):
+            folder_id = split["existing_plan"][item["id"]]
+            if not isinstance(folder_id, str) or not folder_id:
+                raise ValueError("Invalid existing destination for job item")
+            return {"folder_id": folder_id, "path": (split.get("existing_folders") or {}).get(folder_id, "")}
         if split.get("mode") == "selected":
             folder_id = (split.get("plan") or {}).get(item["id"])
             if not isinstance(folder_id, str) or not folder_id:

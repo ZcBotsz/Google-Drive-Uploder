@@ -170,8 +170,11 @@ class FakeDrive:
 
     async def _list(self, req: web.Request) -> web.Response:
         q = req.query.get("q", "")
+        compact_q = q.replace(" ", "")
         files = [f for f in self.files.values() if f["mimeType"] == FOLDER] \
-            if "mimeType='application/vnd.google-apps.folder'" in q else list(self.files.values())
+            if "mimeType='application/vnd.google-apps.folder'" in compact_q else list(self.files.values())
+        if "sharedWithMe=true" in compact_q:
+            files = [f for f in files if f.get("sharedWithMe") is True]
         import re
         m = re.search(r"name contains '([^']*)'", q)
         if m:
@@ -182,6 +185,12 @@ class FakeDrive:
         m = re.search(r"'([^']+)' in parents", q)
         if m and m.group(1) != "root":
             files = [f for f in files if m.group(1) in f.get("parents", [])]
+        if "sharedWithMe=true" in compact_q:
+            start = int(req.query.get("pageToken", "0") or 0)
+            count = int(req.query.get("pageSize", "100"))
+            end = start + count
+            return web.json_response({"files": files[start:end],
+                                      "nextPageToken": str(end) if end < len(files) else ""})
         return web.json_response({"files": files})
 
     async def _create(self, req: web.Request) -> web.Response:
