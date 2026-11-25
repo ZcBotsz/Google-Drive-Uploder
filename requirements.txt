@@ -4,5 +4,6 @@ aiohttp>=3.10,<4
 fastapi>=0.115,<1
 uvicorn[standard]>=0.30,<1
 aiosqlite>=0.20,<1
+python-multipart>=0.0.9,<1
 cryptography>=42,<47
 python-dotenv>=1.0,<2

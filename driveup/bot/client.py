@@ -58,6 +58,9 @@ class BotApp:
         # album aggregation: (chat_id, media_group_id) → [messages]
         self.albums: Dict[tuple, list] = {}
         self.album_tasks: Dict[tuple, asyncio.Task] = {}
+        self.channel_collect_lock = asyncio.Lock()
+        self.channel_setup_pending: set[int] = set()
+        self.channel_verification_alerts: dict[str, float] = {}
         self.started_at = 0.0
 
     def studio_url(self, job_id: str = "", user_id: int = 0, *, admin: bool = False) -> str:
@@ -207,7 +210,7 @@ class GateMiddleware:
             return ""
         action = parts[1]
         arg = parts[-1] if action in self.MULTI_PART else parts[2]
-        if action in ("subok", "noop", "ntplcustom", "openstudio", "admin", "help"):
+        if action in ("subok", "noop", "ntplcustom", "openstudio", "admin", "help", "ui", "menu", "automation", "autoset", "autounlink", "autostatus", "autofinish", "autoempty"):
             return ""
         # ntpl / seqmode / folder / … carry a job id in position 2 → fall through
         # to the ownership check below so it always runs.
@@ -221,6 +224,9 @@ class GateMiddleware:
         role = data.get("role", "user")
         if job["user_id"] != data["event_from_user"].id and role not in ("owner", "admin"):
             return "That job belongs to another account."
+        if action not in ("chfinish", "jobview", "jobcard", "noop") and await self.app.db.one(
+                "SELECT job_id FROM channel_batches WHERE job_id=? AND state='open'", (job["id"],)):
+            return "Finish the channel batch before editing it."
         data["job"] = job
         return ""
 
@@ -333,6 +339,12 @@ def build_dispatcher(app: BotApp) -> Dispatcher:
     dp.message.outer_middleware(GateMiddleware(app))
     dp.callback_query.outer_middleware(GateMiddleware(app))
     dp.message.outer_middleware(AlbumMiddleware(app))
+    # Channel posts often have no sender; do not run the user gate on them.
+    class ChannelContext:
+        async def __call__(self, handler, event, data):
+            data["_app"] = app
+            return await handler(event, data)
+    dp.channel_post.outer_middleware(ChannelContext())
 
     @dp.errors()
     async def on_error(event: ErrorEvent) -> bool:
@@ -340,6 +352,7 @@ def build_dispatcher(app: BotApp) -> Dispatcher:
         await repo.log_error(app.db, "dispatcher", repr(event.exception))
         return True
 
+    from .handlers import channel_collect as channel_h
     from .handlers import admin as admin_h
     from .handlers import start as start_h
     from .handlers import upload as upload_h
@@ -348,9 +361,10 @@ def build_dispatcher(app: BotApp) -> Dispatcher:
 
     # Building the dispatcher twice (a restart, or a second app object in a
     # test) must work: detach the module routers from any previous parent.
-    for r in (menu_h.router, start_h.router, thumb_h.router, upload_h.router, admin_h.router):
+    for r in (channel_h.router, menu_h.router, start_h.router, thumb_h.router, upload_h.router, admin_h.router):
         r._parent_router = None
 
+    dp.include_router(channel_h.router)   # channel posts and explicit finish
     dp.include_router(menu_h.router)      # m:<command> buttons + /hello
     dp.include_router(start_h.router)
     dp.include_router(thumb_h.router)     # before upload: photos are thumbnails

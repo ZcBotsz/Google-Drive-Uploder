@@ -24,8 +24,9 @@ def test_two_consecutive_frames_differ():
     c = progress_card(frame=5, **kw)
     assert a != b, "frame 0 and 1 are identical — nothing animates"
     assert a != c
-    assert sc("telegram → server") in a
-    assert sc("server → drive") in a
+    assert "Telegram to server" in a
+    assert "Server to Google Drive" in a
+    assert all(label in a for label in ("Left", "ETA", "Retries", "Overall"))
     assert "█" not in a and "╭" not in a and "░" not in a
 
 
@@ -84,3 +85,69 @@ def test_the_tick_never_goes_below_telegram_safe_speed():
                  cfg=type("C", (), {"chunk_bytes": 1024, "progress_style": "glow"})(),
                  tick=0.01)
     assert a.tick >= 0.25
+
+
+def test_download_is_not_counted_as_drive_completion():
+    state = ProgressState(total=1000, overall_bytes_done=1000, overall_bytes_total=2000)
+    state.on_tg(1000, 1000)
+    assert state.tg_pct == 100 and state.drive_pct == 0
+    assert state.overall_pct == 50
+    state.on_drive(500, 1000)
+    assert state.overall_pct == 75
+    assert state.done == 500 and state.snapshot()['drive_done'] == 500
+
+
+def test_streamed_both_stages_and_stale_speed():
+    import time
+    state = ProgressState(total=1000, streaming=True)
+    state.on_tg(200, 1000)
+    state.on_drive(100, 1000)
+    state.on_tg(300, 1000)
+    assert state.stage == 'transferring'
+    assert state.snapshot()['tg_done'] == 300
+    state.drive_meter.samples = [(time.monotonic()-30, 1), (time.monotonic()-20, 100)]
+    state.meter.samples = [(time.monotonic()-30, 1), (time.monotonic()-20, 200)]
+    assert state.speed == 0 and state.eta is None
+
+
+async def test_animator_gate_updates_during_download():
+    from driveup.core.animate import Animator
+    from driveup.tg.ratelimit import FloodGate
+    class Bot:
+        def __init__(self): self.edits = []
+        async def edit_message_text(self, **kw): self.edits.append(kw['text'])
+    cfg = type('Cfg', (), {'chunk_bytes': 1048576, 'progress_style': 'glow'})()
+    state = ProgressState(job_id='j', total=1000)
+    bot = Bot()
+    anim = Animator(bot, state, chat_id=1, message_id=1, cfg=cfg, gate=FloodGate(min_gap=0.0), tick=0.25)
+    anim.start()
+    for n in (100, 350, 800):
+        state.on_tg(n, 1000)
+        await asyncio.sleep(0.3)
+    await anim.stop()
+    assert len(bot.edits) >= 3
+    assert any('80.0%' in e for e in bot.edits)
+
+
+def test_full_sse_queue_keeps_latest_and_finish_event():
+    from driveup.core.progress import ProgressHub
+    hub = ProgressHub()
+    q = hub.subscribe('j')
+    state = ProgressState(job_id='j', total=1000)
+    for i in range(300):
+        state.on_tg(i, 1000)
+        hub.put(state)
+    assert list(q._queue)[-1]['tg_done'] == 299
+    hub.finish('j')
+    assert list(q._queue)[-1]['stage'] == 'job-finished'
+
+
+def test_progress_buttons_keep_signed_studio_link_private():
+    from driveup.core.animate import progress_markup
+    cfg = type('Cfg', (), {'session_secret': 'secret', 'public_url':'https://example.test'})()
+    state = ProgressState(job_id='abcd', user_id=21)
+    private = progress_markup(state, cfg, 21)
+    group = progress_markup(state, cfg, -100123)
+    assert len(private.inline_keyboard) == 2
+    assert '/start?t=' in private.inline_keyboard[1][0].url
+    assert len(group.inline_keyboard) == 1

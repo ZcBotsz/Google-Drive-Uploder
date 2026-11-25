@@ -148,6 +148,8 @@ class Settings:
     log_channel_id: str = field(default_factory=lambda: _s("LOG_CHANNEL_ID"))
     lock_channel_id: str = field(default_factory=lambda: _s("LOCK_CHANNEL_ID"))
     dump_channel_id: str = field(default_factory=lambda: _s("DUMP_CHANNEL_ID"))
+    # Optional private intake channel for owner-controlled batch collection.
+    collect_channel_id: str = field(default_factory=lambda: _s("COLLECT_CHANNEL_ID"))
     force_sub_channels: List[str] = field(default_factory=lambda: _list("FORCE_SUB_CHANNELS"))
 
     # ── Locks / abuse ─────────────────────────────────────────────────────
@@ -174,10 +176,10 @@ class Settings:
     timezone: str = field(default_factory=lambda: _s("DEFAULT_TIMEZONE") or "Asia/Kolkata")
     lang: str = field(default_factory=lambda: (_s("DEFAULT_LANG") or "hinglish").lower())
     support_contact: str = field(default_factory=lambda: _s("SUPPORT_CONTACT") or "@ZCQXx")
-    plan_price_text: str = field(default_factory=lambda: _s("PLAN_PRICE_TEXT") or "₹0")
+    plan_price_text: str = field(default_factory=lambda: _s("PLAN_PRICE_TEXT") or "Max · ₹499 / month")
 
     # ── Features ──────────────────────────────────────────────────────────
-    enable_animated_emoji: bool = field(default_factory=lambda: _b("ENABLE_ANIMATED_EMOJI", False))
+    enable_animated_emoji: bool = field(default_factory=lambda: _b("ENABLE_ANIMATED_EMOJI", True))
     progress_style: str = field(default_factory=lambda: (_s("PROGRESS_STYLE") or "glow").lower())
     maintenance: bool = field(default_factory=lambda: _b("MAINTENANCE", False))
     public_studio: bool = field(default_factory=lambda: _b("PUBLIC_STUDIO", True))

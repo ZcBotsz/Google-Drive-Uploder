@@ -17,13 +17,16 @@
 'use strict';
 
 const S = {
+  dashboard: false,
   jobId: '',
+  source: {},
   me: null,
   steps: ['files', 'folder', 'naming', 'sequence', 'review', 'live', 'done'],
   step: 'files',
   files: [],
   folder: { id: 'root', path: 'My Drive' },
-  split: null,                       // {mode:'type'|'season'|'date'|'custom', …} or null
+  split: null,                       // auto split, or explicit per-file destination plan
+  folderGroups: [],                  // ordered name/count allocations in the folder step
   naming: { template: '{original}.{ext}', start: 1, step: 1, prefix: '', suffix: '',
             find: '', replace: '', regex: false, case: 'keep', strip_emoji: true,
             space: ' ', max_bytes: 255, ext_rule: 'keep', force_ext: '' },
@@ -101,10 +104,14 @@ function toast(msg, kind = '') {
 async function api(path, opts = {}) {
   const init = {
     credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { ...(opts.headers || {}) },
     ...opts,
   };
-  if (init.body && typeof init.body !== 'string') init.body = JSON.stringify(init.body);
+  const isForm = typeof FormData !== 'undefined' && init.body instanceof FormData;
+  if (init.body && typeof init.body !== 'string' && !isForm) {
+    init.body = JSON.stringify(init.body);
+    init.headers['Content-Type'] = 'application/json';
+  }
   const tgInit = window.Telegram?.WebApp?.initData;
   if (tgInit) init.headers['X-Telegram-Init-Data'] = tgInit;
   let r;

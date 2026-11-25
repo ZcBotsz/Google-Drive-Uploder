@@ -8,6 +8,38 @@ function currentSplit() {
   if (!sel) return S.split || null;
   const mode = sel.value;
   if (mode === 'none') return null;
+  if (mode === 'tree') {
+    const folders = (S.manualFolders || []).map(path => [...path]);
+    const plan = {};
+    for (const f of S.files) plan[f.id] = [...((S.manualRoutes || {})[f.id] || [])];
+    const existing_plan = {}; const existing_folders = {...(S.manualExistingFolders || {})};
+    for (const f of S.files) if (S.manualExistingRoutes?.[f.id]) existing_plan[f.id] = S.manualExistingRoutes[f.id];
+    return S.files.length ? {mode, folders, plan, existing_plan, existing_folders} : null;
+  }
+  if (mode === 'selected') {
+    const plan = {}; const destinations = {};
+    for (const f of S.files) {
+      const target = (S.fileRoutes || {})[f.id];
+      if (!target || !target.id) return null;
+      plan[f.id] = target.id; destinations[target.id] = target.name;
+    }
+    return S.files.length ? {mode, plan, destinations} : null;
+  }
+  if (mode === 'batches') {
+    const groups = (S.folderGroups || []).map((g) => ({
+      name: String(g.name || '').trim(), count: Number(g.count) || 0,
+    }));
+    const total = groups.reduce((sum, g) => sum + g.count, 0);
+    const uniqueNames = new Set(groups.map((g) => g.name.toLocaleLowerCase()));
+    if (!S.files.length || groups.some((g) => !g.name || g.count < 1)
+        || uniqueNames.size !== groups.length || total !== S.files.length) return null;
+    const plan = {}; let offset = 0;
+    for (const group of groups) {
+      for (const file of S.files.slice(offset, offset + group.count)) plan[file.id] = [group.name];
+      offset += group.count;
+    }
+    return { mode: 'batches', groups, plan, rules: [], else: 'Other' };
+  }
   const parts = ($('#splitRule') && $('#splitRule').value || '').split('→').map((x) => x.trim());
   return {
     mode,
@@ -271,12 +303,27 @@ async function viewReview(view) {
   const total = S.files.reduce((a, f) => a + f.size, 0);
   const speed = S.measuredSpeed || 0;
   const eta = speed > 0 ? total / speed : 0;
+  const batchSummary = S.split?.mode === 'batches'
+    ? (S.split.groups || []).map((g) => `${esc(g.name)} (${Number(g.count) || 0})`).join(' · ')
+    : '';
+  const selectedReview = S.split?.mode === 'selected' ? S.files.map(f => {
+    const id = S.split.plan[f.id];
+    return `<li>${esc(f.name)} → ${esc(S.split.destinations[id] || id)}</li>`;
+  }).join('') : '';
+  const manualReview = S.split?.mode === 'tree' ? `
+    <details open class="route-review"><summary>Folder tree (${(S.split.folders || []).length} folders)</summary>
+      <ul>${(S.split.folders || []).map(path => `<li>📁 ${esc(path.join(' / '))}</li>`).join('')}
+      ${Object.values(S.split.existing_folders || {}).map(name => `<li>📁 Existing: ${esc(name)}</li>`).join('')}
+      ${S.files.map(f => { const id = S.split.existing_plan?.[f.id]; const name = id ? (S.split.existing_folders?.[id] || id) : ((S.split.plan[f.id] || []).join(' / ') || '(parent folder)'); return `<li>📄 ${esc(f.name)} → ${esc(name)}</li>`; }).join('')}</ul></details>` : '';
   const c = el('div', 'card');
   c.innerHTML = `
     <h2>Review</h2>
     <div class="kv"><span>Files</span><span>${S.files.length}</span></div>
     <div class="kv"><span>Total size</span><span>${humanBytes(total)}</span></div>
     <div class="kv"><span>Destination</span><span>${esc(S.folder.path)}</span></div>
+    ${batchSummary ? `<div class="kv"><span>Folder batches</span><span>${batchSummary}</span></div>` : ''}
+    ${selectedReview ? `<details open class="route-review"><summary>File destinations (${S.files.length})</summary><ul>${selectedReview}</ul></details>` : ''}
+    ${manualReview}
     <div class="kv"><span>Naming</span><span class="mono">${esc(S.naming.template)}</span></div>
     <div class="kv"><span>Order</span><span>${esc(S.sequence.mode)}${S.sequence.strict ? ' · strict' : ''}</span></div>
     <div class="kv"><span>Conflicts</span><span>${esc(S.conflict)}</span></div>
@@ -323,7 +370,6 @@ async function startUpload() {
     if (res.preset_saved) toast('Preset saved', 'ok');
     S.startedAt = Date.now();
     go('live');
-    attachSSE();
   } catch (e) {
     toast(e.message, 'err');
     if (btn) { btn.disabled = false; btn.textContent = '🚀 Start upload'; }

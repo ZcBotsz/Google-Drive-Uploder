@@ -53,7 +53,7 @@ async def test_start_link_mints_a_session_and_redirects(web):
     tok = mint_token(web["cfg"].session_secret, 55)
     r = await web["client"].get(f"/start?t={tok}", follow_redirects=False)
     assert r.status_code == 303, r.text
-    assert r.headers["location"] == "/"
+    assert r.headers["location"] == "/studio"
     assert r.cookies.get("du_session"), "no session cookie was set"
     # and that cookie really authenticates
     me = await web["client"].get("/api/me")
@@ -64,7 +64,7 @@ async def test_start_link_carries_the_job_id(web):
     job = await make_job(web)
     tok = mint_token(web["cfg"].session_secret, 55, job_id=job)
     r = await web["client"].get(f"/start?t={tok}&job={job}", follow_redirects=False)
-    assert r.headers["location"] == f"/?job={job}"
+    assert r.headers["location"] == f"/studio?job={job}"
     body = (await web["client"].get(f"/api/me?job={job}")).json()
     assert body["job"]["id"] == job
 
@@ -92,16 +92,16 @@ async def test_expired_start_link_explains_itself(web):
     assert "du_session" not in r.cookies
 
 
-async def test_connect_without_session_explains_how_to_get_one(web):
-    r = await web["client"].get("/connect")
-    assert r.status_code == 200                    # never a bare 404/401
-    assert "/connect" in r.text
+async def test_connect_without_session_starts_google_login(web):
+    r = await web["client"].get("/connect", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/auth/google/login"
 
 
 async def test_studio_page_serves_the_app_when_signed_in(web):
     tok = mint_token(web["cfg"].session_secret, 55)
     await web["client"].get(f"/start?t={tok}", follow_redirects=False)
-    r = await web["client"].get("/")
+    r = await web["client"].get("/studio")
     assert r.status_code == 200
     assert len(r.text) > 1500                      # the real app, not the blocker
     assert "blocker" not in r.text

@@ -112,14 +112,14 @@ async def download_to_file(
     # Even better, when the local server put the bytes on a disk we can reach,
     # just read them — no HTTP copy through the same box.
     if os.path.isabs(file_path) and os.path.exists(file_path):
-        if progress:
-            out = progress(total or os.path.getsize(file_path), total)
-            if hasattr(out, "__await__"):
-                await out
         try:
             os.replace(file_path, path)      # same filesystem: atomic move
         except OSError:
             shutil.move(file_path, path)     # different mount: copy + unlink
+        if progress:
+            out = progress(path.stat().st_size, total or path.stat().st_size)
+            if hasattr(out, "__await__"):
+                await out
         return {"path": str(path), "size": path.stat().st_size,
                 "file_path": url_path}
 
@@ -219,11 +219,16 @@ def file_server_url(bot, local_path: str, work_dir: str) -> str:
     # does not work".
     base = _with_file_port(base, getattr(bot, "api_port", ""),
                            getattr(bot, "files_port", ""))
-    rel = local_path
-    prefix = (work_dir or "").rstrip("/")
-    if prefix and rel.startswith(prefix):
-        rel = rel[len(prefix):]
-    return f"{base}/{rel.lstrip('/')}"
+    # Callers may already have removed the leading slash from Telegram's
+    # absolute local-API path. Normalize both sides before stripping the work
+    # directory; otherwise the server is asked for
+    # /var/lib/telegram-bot-api/<bot>/documents/... under an nginx root that is
+    # already /var/lib/telegram-bot-api, producing a 404.
+    rel = (local_path or "").lstrip("/")
+    prefix = (work_dir or "").strip("/")
+    if prefix and (rel == prefix or rel.startswith(prefix + "/")):
+        rel = rel[len(prefix):].lstrip("/")
+    return f"{base}/{rel}"
 
 
 def remote_path_for(bot, file_path: str, work_dir: str) -> str:

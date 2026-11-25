@@ -1,7 +1,9 @@
 """FastAPI application — Studio, admin, API, static, security headers."""
 from __future__ import annotations
 
+import html
 import logging
+import re
 import time
 from pathlib import Path
 
@@ -148,7 +150,7 @@ def create_app(*, db, cfg: Settings, bot, worker, accounts, access, hub=None,
                                  request.client.host if request.client else "",
                                  request.headers.get("user-agent", ""))
         proto = request.headers.get("x-forwarded-proto", request.url.scheme).split(",")[0].strip()
-        target = "/admin" if claim["admin"] or to == "admin" else "/"
+        target = "/admin" if claim["admin"] or to == "admin" else "/studio"
         if job:
             target += f"?job={job}"
         resp = RedirectResponse(target, status_code=303)
@@ -162,39 +164,53 @@ def create_app(*, db, cfg: Settings, bot, worker, accounts, access, hub=None,
         sid = request.cookies.get("du_session")
         if sid and await repo.get_session(st.db, sid):
             return RedirectResponse("/auth/google/start", status_code=303)
-        return HTMLResponse(
-            '<!doctype html><meta charset=utf-8>'
-            '<meta name=viewport content="width=device-width,initial-scale=1">'
-            '<meta name=theme-color content="#081014"><title>Connect Drive</title>'
-            '<body style="background:#081014;color:#e8f6fa;font:16px system-ui;'
-            'display:grid;place-items:center;min-height:100vh;margin:0;text-align:center">'
-            '<div style="max-width:340px;padding:24px"><div style="font-size:46px">🔗</div>'
-            '<h2 style="margin:10px 0 6px">Link Google Drive from the bot</h2>'
-            '<p style="color:#7fa3ad;font-size:.9rem">Send <b>/connect</b> to the bot and tap '
-            'the button it replies with — that link carries your session. '
-            'Opening this page directly cannot work, by design.</p></div></body>',
-            status_code=200)
+        return RedirectResponse("/auth/google/login", status_code=303)
 
-    @app.get("/", response_class=HTMLResponse)
-    async def index(request: Request):
-        """Studio, but only with a session — otherwise explain how to get one."""
+    @app.get("/")
+    async def index():
+        """The primary website opens the Studio; authentication protects its data."""
+        return RedirectResponse("/studio", status_code=307)
+
+    @app.get("/home", response_class=HTMLResponse)
+    async def public_home():
+        """Optional public product/plan information; it never contains private data."""
+        home = STATIC / "home.html"
+        if not home.exists():
+            return HTMLResponse(f"<h1>{html.escape(BRAND_NAME)}</h1><a href='/studio'>Open Studio</a>")
+        body = home.read_text(encoding="utf-8").replace("{{BOT_LINK}}", "/studio")
+        return HTMLResponse(body, status_code=200)
+
+    @app.get("/privacy", response_class=HTMLResponse)
+    async def privacy_policy():
+        """Public policy for the OAuth consent screen, no session required."""
+        return HTMLResponse((STATIC / "privacy.html").read_text(encoding="utf-8"))
+
+    @app.get("/terms", response_class=HTMLResponse)
+    async def terms_of_service():
+        """Public terms for the OAuth consent screen, no session required."""
+        return HTMLResponse((STATIC / "terms.html").read_text(encoding="utf-8"))
+
+    @app.get("/studio", response_class=HTMLResponse)
+    async def studio(request: Request):
+        """Private transfer workspace. Bot-signed links land here after redemption."""
         sid = request.cookies.get("du_session")
-        if not sid:
-            html = f"""<!doctype html>
+        if not sid or not await repo.get_session(request.app.state.db, sid):
+            html_body = f"""<!doctype html>
             <html lang="en" data-bar="glow"><head><meta charset=utf-8>
             <meta name=viewport content="width=device-width,initial-scale=1">
             <meta name=theme-color content="#081014">
-            <title>{BRAND_NAME} · Studio</title>
+            <title>{html.escape(BRAND_NAME)} · Studio</title>
             <link rel=icon href="/static/favicon.svg" type="image/svg+xml">
             <link rel=stylesheet href="/static/app.css"></head><body>
             <div class="blocker"><div class="inner">
               <div class="icon">🚀</div>
-              <h1>{BRAND_NAME} Studio</h1>
-              <p>Open this page from the bot — tap <b>🌐 Open Upload Studio</b> or send
-                 <code>/studio</code>. The link carries a signed session, one link per job.</p>
-              <p class="hint">Already have a link? Open it again — sessions last 7 days.</p>
+              <h1>{html.escape(BRAND_NAME)} Studio</h1>
+              <p>Sign in with Google to connect your Drive and open the Studio. You can use the website directly; Telegram is optional.</p>
+              <p><a class="btn primary" href="/auth/google/login">Continue with Google Drive</a></p>
+              <p class="hint">Your workspace is tied to your sign-in. Other regular users cannot access your jobs or files; authorized admin roles retain service tools. Google Drive quota and service limits apply.</p>
+              <p><a href="/home">About ZC Drive Upload</a> · <a href="/privacy">Privacy Policy</a> · <a href="/terms">Terms of Service</a></p>
             </div></div></body></html>"""
-            return HTMLResponse(html, status_code=200)
+            return HTMLResponse(html_body, status_code=200)
         return HTMLResponse((STATIC / "index.html").read_text(encoding="utf-8"))
 
     @app.exception_handler(404)

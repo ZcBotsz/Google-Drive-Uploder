@@ -21,17 +21,21 @@ import csv
 import io
 import json
 import logging
+import os
 import secrets
+import uuid
 import time
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Body, Depends, Query, Request, Response
+from fastapi import APIRouter, Body, Depends, File, Form, Query, Request, Response, UploadFile
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                RedirectResponse, StreamingResponse)
+from pathlib import Path
 
 from ..config import BRAND_NAME, settings as default_settings
 from ..core import naming as naming_mod
 from ..core.access import human_bytes, unlock_at_text
+from ..core.groups import safe_folder_name
 from ..db import repo
 from ..drive import auth as oauth
 from ..drive.client import FOLDER_MIME, folder_id_from_url
@@ -113,7 +117,12 @@ async def api_me(request: Request, user=Depends(session_user)):
               progress_style=glob.get("progress_style", "glow"),
               drive_connected=bool(acc) and not acc.get("needs_reconnect"),
               drive_email=(acc or {}).get("email", ""),
-              plan={"id": plan.get("id"), "name": plan.get("name")},
+              plan={"id": plan.get("id"), "name": plan.get("name"),
+                    "max_files_job": plan.get("max_files_job"),
+                    "max_file_mb": plan.get("max_file_mb"),
+                    "daily_gb": plan.get("daily_gb")},
+              usage_today=await repo.quota_used(st.db, user["user_id"]),
+              upload_stats=await repo.user_stats(st.db, user["user_id"]),
               job=job, blocked=blocked)
 
 
@@ -121,6 +130,7 @@ async def job_payload(st, job: dict) -> dict:
     items = await repo.items_of(st.db, job["id"])
     return {
         "id": job["id"], "status": job["status"],
+        "source": job.get("source") or {},
         "destination": job.get("destination") or {},
         "naming": job.get("naming") or {},
         "sequence_mode": job.get("sequence_mode"),
@@ -151,12 +161,133 @@ async def owned_job(request: Request, job_id: str, user: dict) -> Optional[dict]
 
 
 # ── jobs ────────────────────────────────────────────────────────────────────
+@router.get("/api/jobs")
+async def api_jobs(request: Request, limit: int = Query(25, ge=1, le=100),
+                   user=Depends(session_user)):
+    """Private upload history. The user ID is always taken from the verified session."""
+    st = state_of(request)
+    rows = await repo.jobs_for_user(st.db, user["user_id"], limit=limit)
+    return ok(jobs=[{
+        "id": row["id"], "status": row["status"], "created_at": row.get("created_at"),
+        "destination": row.get("destination") or {}, "totals": row.get("totals") or {},
+    } for row in rows])
+
+
+@router.post("/api/uploads")
+async def api_browser_upload(request: Request, files: List[UploadFile] = File(...),
+                             job_id: str = Form(""), user=Depends(session_user)):
+    """Stage browser-selected files for the existing Drive worker pipeline.
+
+    Job ownership, account connection, plan/file limits, and daily byte ceilings
+    are checked server-side. Browser-supplied user IDs are never accepted.
+    """
+    st = state_of(request)
+    if not files or len(files) > 100:
+        return fail("file_count", "Send 1–100 files per batch. The Studio combines batches into one job.", 422)
+    target_job = None
+    if job_id:
+        target_job = await owned_job(request, job_id, user)
+        if not target_job:
+            return fail("not_found", "job not found", 404)
+        if await st.db.one("SELECT job_id FROM channel_batches WHERE job_id=? AND state='open'", (job_id,)):
+            return fail("collection_open", "Finish the channel batch before editing it.", 409)
+        if target_job["status"] != "draft":
+            return fail("locked", "Files can only be added to a draft upload.", 409)
+    decision = await st.access.gate(user["user_id"], scope="upload", need_connect=True,
+                                    feature="web_studio")
+    if not decision:
+        return fail(decision.reason, decision.screen, 403)
+    plan = decision.extra.get("plan") or await repo.effective_plan(st.db, user["user_id"])
+    existing = await repo.items_of(st.db, job_id) if target_job else []
+    max_files = int(plan.get("max_files_job") or 5000)
+    if len(existing) + len(files) > max_files:
+        return fail("plan", f"Your plan allows {max_files} files per job.", 403)
+    max_bytes = int(plan.get("max_file_mb") or getattr(st.cfg, "default_max_file_mb", 2000)) * 1024 ** 2
+    daily_cap = int(float(plan.get("daily_gb") or 0) * 1024 ** 3)
+    used = await repo.quota_used(st.db, user["user_id"])
+    batch_cap = max(0, daily_cap - int(used.get("bytes", 0))) if daily_cap else 0
+    root = Path(st.cfg.download_dir) / "studio"
+    root.mkdir(parents=True, exist_ok=True)
+    staged: list[dict] = []
+    temporary: list[Path] = []
+    total_bytes = 0
+    try:
+        for upload in files:
+            original = os.path.basename((upload.filename or "file").replace("\\", "/")).strip() or "file"
+            original = original[:240]
+            token = uuid.uuid4().hex
+            final_path = root / f"{token}.upload"
+            temp_path = root / f"{token}.part"
+            temporary.append(temp_path)
+            size = 0
+            with temp_path.open("wb") as out:
+                while True:
+                    chunk = await upload.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    total_bytes += len(chunk)
+                    if size > max_bytes:
+                        raise ValueError(f"{original} exceeds the {max_bytes // (1024 ** 2)} MB per-file limit.")
+                    if daily_cap and total_bytes > batch_cap:
+                        raise ValueError("This batch exceeds the remaining daily upload allowance.")
+                    out.write(chunk)
+            if size == 0:
+                temp_path.unlink(missing_ok=True)
+                continue
+            os.replace(temp_path, final_path)
+            staged.append({"path": final_path, "name": original, "size": size,
+                           "mime": upload.content_type or "application/octet-stream", "token": token})
+        if not staged:
+            raise ValueError("The selected files are empty.")
+        if target_job:
+            jid = job_id
+        else:
+            jid = await repo.create_job(
+                st.db, user["user_id"], destination={"folder_id": "root", "path": "My Drive"},
+                naming={"template": "{original}.{ext}"}, sequence_mode="manual",
+                source={"kind": "web_studio"})
+        for entry in staged:
+            item_id = await repo.add_item(
+                st.db, jid, file_id=f"web:{entry['token']}",
+                file_unique_id=f"web:{entry['token']}", msg_id=0,
+                size=entry["size"], mime=entry["mime"], name=entry["name"],
+                chat_id=user["user_id"])
+            item = await repo.get_item(st.db, item_id)
+            tg = item.get("tg") or {}
+            tg["source_path"] = str(entry["path"])
+            await repo.set_item(st.db, item_id, tg=tg)
+        await repo.recompute_totals(st.db, jid)
+        fresh = await repo.get_job(st.db, jid)
+        await repo.audit(st.db, user["user_id"], "studio.browser_upload", jid,
+                         {"files": len(staged), "bytes": total_bytes})
+        return ok(job=await job_payload(st, fresh))
+    except ValueError as e:
+        for entry in staged:
+            entry["path"].unlink(missing_ok=True)
+        for path in temporary:
+            path.unlink(missing_ok=True)
+        return fail("upload_limit", str(e), 413)
+    except Exception:
+        for entry in staged:
+            entry["path"].unlink(missing_ok=True)
+        for path in temporary:
+            path.unlink(missing_ok=True)
+        raise
+    finally:
+        for upload in files:
+            await upload.close()
+
+
 @router.get("/api/jobs/{job_id}")
 async def api_job(request: Request, job_id: str, user=Depends(session_user)):
     st = state_of(request)
     job = await owned_job(request, job_id, user)
     if not job:
         return fail("not_found", "job not found", 404)
+    if job["status"] in ("queued", "running", "paused"):
+        job["totals"] = await repo.recompute_totals(st.db, job_id)
+        job = await repo.get_job(st.db, job_id)
     return ok(**await job_payload(st, job))
 
 
@@ -167,6 +298,8 @@ async def api_patch_job(request: Request, job_id: str, body: dict = Body(...),
     job = await owned_job(request, job_id, user)
     if not job:
         return fail("not_found", "job not found", 404)
+    if await st.db.one("SELECT job_id FROM channel_batches WHERE job_id=? AND state='open'", (job_id,)):
+        return fail("collection_open", "Finish the channel batch before editing it.", 409)
     if job["status"] in ("running", "queued"):
         return fail("locked", "the job is already running", 409)
     patch: Dict[str, Any] = {}
@@ -177,15 +310,141 @@ async def api_patch_job(request: Request, job_id: str, body: dict = Body(...),
         split = dest.get("split")
         if split:
             mode = str(split.get("mode") or "none").lower()
-            if mode not in ("none", "type", "season", "date", "custom"):
+            if mode not in ("none", "type", "season", "date", "custom", "batches", "selected", "tree"):
                 return fail("bad_split", "unknown split mode", 422)
+            raw_plan = split.get("plan") or {}
+            if not isinstance(raw_plan, dict):
+                return fail("bad_split", "Invalid folder assignment plan.", 422)
+            route_plan = dict(raw_plan)
+            groups = []
+            if mode == "batches":
+                items = await repo.items_of(st.db, job_id)
+                allowed = {item["id"] for item in items}
+                raw_groups = split.get("groups") or []
+                seen_names = set()
+                for group in raw_groups[:20]:
+                    raw_name = str((group or {}).get("name") or "").strip()
+                    if not raw_name:
+                        return fail("bad_split", "Name every destination folder.", 422)
+                    name = safe_folder_name(raw_name, limit=80)
+                    if name.casefold() in seen_names:
+                        return fail("bad_split", "Each destination folder needs a unique name.", 422)
+                    seen_names.add(name.casefold())
+                    count = int((group or {}).get("count") or 0)
+                    if count < 1:
+                        return fail("bad_split", "Each folder group needs a positive file count.", 422)
+                    groups.append({"name": name, "count": count})
+                if not groups or sum(g["count"] for g in groups) != len(items):
+                    return fail("bad_split", "Folder counts must add up to every file in the job.", 422)
+                if set(route_plan) != allowed:
+                    return fail("bad_split", "Every job file needs exactly one folder assignment.", 422)
+                clean_plan = {}
+                for item_id, chain in route_plan.items():
+                    if not isinstance(chain, list) or len(chain) != 1:
+                        return fail("bad_split", "Each batch item must map to one child folder.", 422)
+                    clean_plan[item_id] = [safe_folder_name(str(chain[0]), limit=80)]
+                route_plan = clean_plan
+            destinations = {}
+            if mode == "selected":
+                items = await repo.items_of(st.db, job_id)
+                allowed = {item["id"] for item in items}
+                if not isinstance(route_plan, dict) or set(route_plan) != allowed or not allowed:
+                    return fail("bad_split", "Assign every job file to a folder.", 422)
+                if any(not isinstance(fid, str) or not fid or len(fid) > 256 for fid in route_plan.values()):
+                    return fail("bad_split", "Invalid folder assignment.", 422)
+                folder_ids = set(route_plan.values())
+                if len(folder_ids) > 100:
+                    return fail("bad_split", "Use at most 100 destination folders per job.", 422)
+                client = await _client(request, user)
+                if client is None:
+                    return fail("not_connected", "Connect Google Drive first.", 409)
+                for fid in folder_ids:
+                    if fid == "root":
+                        destinations[fid] = "My Drive"
+                        continue
+                    try:
+                        folder = await client.get(fid)
+                    except DriveError:
+                        return fail("bad_split", "A destination is not accessible in your connected Drive.", 422)
+                    if (folder.get("mimeType") != "application/vnd.google-apps.folder"
+                            or folder.get("trashed") or folder.get("capabilities", {}).get("canAddChildren") is False):
+                        return fail("bad_split", "A destination is not a writable Drive folder.", 422)
+                    destinations[fid] = str(folder.get("name") or "Folder")[:200]
+            tree_folders = []
+            existing_plan = {}
+            existing_folders = {}
+            if mode == "tree":
+                items = await repo.items_of(st.db, job_id)
+                if not items or set(route_plan) != {item["id"] for item in items}:
+                    return fail("bad_split", "Every job file needs a tree destination.", 422)
+                raw_folders = split.get("folders")
+                if not isinstance(raw_folders, list) or len(raw_folders) > 200:
+                    return fail("bad_split", "Use at most 200 folders in the tree.", 422)
+                def valid_chain(chain):
+                    return (isinstance(chain, list) and len(chain) <= 12 and
+                            all(isinstance(n, str) and 0 < len(n) <= 80 and
+                                safe_folder_name(n, limit=80) == n for n in chain))
+                if any(not valid_chain(c) or not c for c in raw_folders):
+                    return fail("bad_split", "Invalid folder name or tree depth (maximum 12 levels).", 422)
+                keys = [tuple(c) for c in raw_folders]
+                if len(keys) != len(set(keys)):
+                    return fail("bad_split", "Duplicate tree folder.", 422)
+                folder_set = set(keys)
+                if any(len(c) > 1 and c[:-1] not in folder_set for c in keys):
+                    return fail("bad_split", "A tree folder is missing its parent.", 422)
+                if any(not valid_chain(chain) or (chain and tuple(chain) not in folder_set)
+                       for chain in route_plan.values()):
+                    return fail("bad_split", "A file points to a missing or invalid folder.", 422)
+                root_id = new_dest["folder_id"]
+                if not isinstance(root_id, str) or not root_id or len(root_id) > 256:
+                    return fail("bad_split", "Invalid parent destination.", 422)
+                client = await _client(request, user)
+                if client is None:
+                    return fail("not_connected", "Connect Google Drive first.", 409)
+                if root_id != "root":
+                    try:
+                        folder = await client.get(root_id)
+                    except DriveError:
+                        return fail("bad_split", "The parent folder is not accessible in your connected Drive.", 422)
+                    if (folder.get("mimeType") != "application/vnd.google-apps.folder"
+                            or folder.get("trashed") or folder.get("capabilities", {}).get("canAddChildren") is False):
+                        return fail("bad_split", "The parent destination is not a writable folder.", 422)
+                raw_existing = split.get("existing_folders") or {}
+                existing_plan = split.get("existing_plan") or {}
+                if not isinstance(raw_existing, dict) or len(raw_existing) > 100 or not isinstance(existing_plan, dict):
+                    return fail("bad_split", "Invalid existing folder assignments.", 422)
+                if not set(existing_plan).issubset(set(route_plan)):
+                    return fail("bad_split", "An assignment is not a file in this job.", 422)
+                if any(not isinstance(fid, str) or not fid or len(fid) > 256 for fid in raw_existing):
+                    return fail("bad_split", "Invalid existing folder ID.", 422)
+                if any(not isinstance(fid, str) or fid not in raw_existing for fid in existing_plan.values()):
+                    return fail("bad_split", "A file points to a missing existing folder.", 422)
+                if any(route_plan[item] for item in existing_plan):
+                    return fail("bad_split", "A file cannot have both a new and existing folder destination.", 422)
+                for fid in raw_existing:
+                    if fid == "root":
+                        existing_folders[fid] = "My Drive"
+                        continue
+                    try:
+                        folder = await client.get(fid)
+                    except DriveError:
+                        return fail("bad_split", "An existing folder is not accessible in your connected Drive.", 422)
+                    if (folder.get("mimeType") != "application/vnd.google-apps.folder"
+                            or folder.get("trashed") or folder.get("capabilities", {}).get("canAddChildren") is False):
+                        return fail("bad_split", "An existing folder is not writable by your Google account.", 422)
+                    existing_folders[fid] = str(folder.get("name") or "Folder")[:200]
+                tree_folders = sorted(raw_folders, key=len)
             new_dest["split"] = {
                 "mode": mode,
                 "rules": [{k: str(v) for k, v in (r or {}).items()}
                           for r in (split.get("rules") or [])][:20],
                 "else": str(split.get("else") or "Other")[:120],
-                # a precomputed plan lets the worker skip re-deriving it
-                "plan": {k: v for k, v in (split.get("plan") or {}).items()} if split.get("plan") else {},
+                "plan": route_plan,
+                "groups": groups if mode == "batches" else [],
+                "destinations": destinations if mode == "selected" else {},
+                "folders": tree_folders if mode == "tree" else [],
+                "existing_plan": existing_plan if mode == "tree" else {},
+                "existing_folders": existing_folders if mode == "tree" else {},
             }
         patch["destination"] = new_dest
     if "naming" in body:
@@ -219,7 +478,7 @@ async def recompute_names(st, job: dict, items: list) -> None:
             seq=opt.start + (i - 1) * opt.step, index=i, total=total, opt=opt,
             size=tg.get("size", 0), caption=tg.get("caption", ""),
             message_id=tg.get("msg_id", 0)))
-    resolved = naming_mod.dedupe_names(names, job.get("conflict_policy") or "rename")
+    resolved = naming_mod.dedupe_job_names(names, items, job, job.get("conflict_policy") or "rename")
     for i, it in enumerate(items):
         new = resolved[i] if i in resolved else names[i]
         if new != it["final_name"]:
@@ -238,6 +497,13 @@ async def api_preview_names(request: Request, job_id: str, body: dict = Body(def
     payload = [{"name": (i["tg"] or {}).get("name", ""), "size": (i["tg"] or {}).get("size", 0),
                 "mime": (i["tg"] or {}).get("mime", ""),
                 "caption": (i["tg"] or {}).get("caption", "")} for i in items]
+    split = (job.get("destination") or {}).get("split") or {}
+    if split.get("mode") == "tree":
+        for row, item in zip(payload, items):
+            fid = (split.get("existing_plan") or {}).get(item["id"])
+            root = (job.get("destination") or {}).get("folder_id") or "root"
+            row["folder_key"] = (["\x00existing", fid] if fid and fid != root
+                                 else (split.get("plan") or {}).get(item["id"], []))
     rows = naming_mod.preview_rows(payload, opt, start=opt.start)
     return ok(rows=rows)
 
@@ -249,9 +515,18 @@ async def api_delete_item(request: Request, job_id: str, item_id: str,
     job = await owned_job(request, job_id, user)
     if not job:
         return fail("not_found", "job not found", 404)
+    if await st.db.one("SELECT job_id FROM channel_batches WHERE job_id=? AND state='open'", (job_id,)):
+        return fail("collection_open", "Finish the channel batch before editing it.", 409)
     items = await repo.items_of(st.db, job_id)
-    if not any(i["id"] == item_id for i in items):
+    target_item = next((i for i in items if i["id"] == item_id), None)
+    if not target_item:
         return fail("not_found", "item not found", 404)
+    staged_path = (target_item.get("tg") or {}).get("source_path")
+    if staged_path:
+        staged_root = (Path(st.cfg.download_dir) / "studio").resolve()
+        candidate = Path(staged_path).resolve()
+        if candidate.parent == staged_root:
+            candidate.unlink(missing_ok=True)
     await repo.delete_item(st.db, item_id)
     rest = await repo.items_of(st.db, job_id)
     await repo.reorder_items(st.db, job_id, [i["id"] for i in rest])
@@ -266,6 +541,8 @@ async def api_reorder(request: Request, job_id: str, body: dict = Body(...),
     job = await owned_job(request, job_id, user)
     if not job:
         return fail("not_found", "job not found", 404)
+    if await st.db.one("SELECT job_id FROM channel_batches WHERE job_id=? AND state='open'", (job_id,)):
+        return fail("collection_open", "Finish the channel batch before editing it.", 409)
     order = [str(x) for x in (body.get("order") or [])]
     items = await repo.items_of(st.db, job_id)
     ids = [i["id"] for i in items]
@@ -284,6 +561,8 @@ async def api_start(request: Request, job_id: str, body: dict = Body(default={})
     job = await owned_job(request, job_id, user)
     if not job:
         return fail("not_found", "job not found", 404)
+    if await st.db.one("SELECT job_id FROM channel_batches WHERE job_id=? AND state='open'", (job_id,)):
+        return fail("collection_open", "Finish the channel batch in the bot before starting this upload.", 409)
     decision = await st.access.gate(user["user_id"], scope="upload", need_connect=True,
                                     feature="web_studio")
     if not decision:
@@ -321,6 +600,9 @@ async def _job_control(request: Request, job_id: str, action: str) -> JSONRespon
     job = await repo.get_job(st.db, job_id)
     if not job:
         return fail("not_found", "job not found", 404)
+    if await st.db.one(
+            "SELECT job_id FROM channel_batches WHERE job_id=? AND state='open'", (job_id,)):
+        return fail("collection_open", "Finish the channel batch in the bot first.", 409)
     if action == "pause":
         await st.worker.pause(job_id)
     elif action == "resume":
@@ -366,9 +648,13 @@ async def api_events(request: Request, job_id: str, user=Depends(session_user)):
                 if await request.is_disconnected():
                     break
                 try:
-                    payload = await asyncio.wait_for(queue.get(), timeout=15)
+                    payload = await asyncio.wait_for(queue.get(), timeout=5)
                 except asyncio.TimeoutError:
-                    yield ": ping\n\n"
+                    current = st.worker.hub.get(job_id)
+                    if current:
+                        yield f"data: {json.dumps(current.snapshot())}\n\n"
+                    else:
+                        yield ": ping\n\n"
                     continue
                 yield f"data: {json.dumps(payload)}\n\n"
                 if payload.get("stage") == "job-finished":
@@ -414,15 +700,23 @@ async def api_children(request: Request, parent: str = "root", page: str = "",
                        user=Depends(session_user)):
     client = await _client(request, user)
     if client is None:
-        return fail("not_connected", "Google Drive is not connected — send /connect to the bot", 409)
+        return fail("not_connected", "Google Drive is not connected — sign in with Google to reconnect", 409)
     try:
         data = await client.list_folders(parent, page_token=page)
-        about = {}
-        try:
-            about = await client.about()
-        except DriveError:
-            pass
-        return ok(parent=parent, next=data["next"], folders=data["files"], about=about)
+        return ok(parent=parent, next=data["next"], folders=data["files"])
+    except DriveError as e:
+        return fail(e.code, str(e), 502)
+
+
+@router.get("/api/drive/shared-folders")
+async def api_shared_folders(request: Request, page: str = Query("", max_length=2048),
+                             user=Depends(session_user)):
+    client = await _client(request, user)
+    if client is None:
+        return fail("not_connected", "Connect your Google Drive account first.", 409)
+    try:
+        data = await client.shared_folders(page_token=page)
+        return ok(next=data["next"], folders=data["files"])
     except DriveError as e:
         return fail(e.code, str(e), 502)
 
@@ -532,13 +826,52 @@ async def api_del_favourite(request: Request, folder_id: str, user=Depends(sessi
 
 
 # ── Google OAuth ────────────────────────────────────────────────────────────
+@router.get("/auth/google/login")
+async def google_web_login(request: Request):
+    """Start a bot-free Studio session using Google Drive OAuth directly."""
+    st = state_of(request)
+    sid = request.cookies.get(SESSION_COOKIE, "")
+    existing = await repo.get_session(st.db, sid) if sid else None
+    if existing:
+        user = await repo.get_user(st.db, existing["user_id"])
+        account = await repo.get_drive_account(st.db, existing["user_id"])
+        if user and account:
+            return RedirectResponse("/studio", status_code=303)
+        if user:
+            state = oauth.new_state()
+            verifier = oauth.new_verifier()
+            await repo.create_state(st.db, state, user["user_id"], verifier)
+            resp = RedirectResponse(oauth.build_authorize_url(st.cfg, state, verifier), status_code=303)
+            resp.set_cookie("du_oauth_state", state, max_age=900, httponly=True,
+                            secure=request.headers.get("x-forwarded-proto", request.url.scheme).split(",")[0].strip() == "https",
+                            samesite="lax", path="/")
+            return resp
+    # Negative, high-entropy web-only IDs cannot collide with Telegram's positive IDs.
+    user_id = -(secrets.randbelow(2**50) + 2**40)
+    while await repo.get_user(st.db, user_id):
+        user_id = -(secrets.randbelow(2**50) + 2**40)
+    await repo.upsert_user(st.db, user_id, name="Web user", username="web", lang="en")
+    state = oauth.new_state()
+    verifier = oauth.new_verifier()
+    await repo.create_state(st.db, state, user_id, verifier)
+    resp = RedirectResponse(oauth.build_authorize_url(st.cfg, state, verifier), status_code=303)
+    resp.set_cookie("du_oauth_state", state, max_age=900, httponly=True,
+                    secure=request.headers.get("x-forwarded-proto", request.url.scheme).split(",")[0].strip() == "https",
+                            samesite="lax", path="/")
+    return resp
+
+
 @router.get("/auth/google/start")
 async def google_start(request: Request, user=Depends(session_user)):
     st = state_of(request)
     state = oauth.new_state()
     verifier = oauth.new_verifier()
     await repo.create_state(st.db, state, user["user_id"], verifier)
-    return RedirectResponse(oauth.build_authorize_url(st.cfg, state, verifier))
+    resp = RedirectResponse(oauth.build_authorize_url(st.cfg, state, verifier), status_code=303)
+    resp.set_cookie("du_oauth_state", state, max_age=900, httponly=True,
+                    secure=request.headers.get("x-forwarded-proto", request.url.scheme).split(",")[0].strip() == "https",
+                            samesite="lax", path="/")
+    return resp
 
 
 @router.get("/auth/google/callback")
@@ -549,7 +882,10 @@ async def google_callback(request: Request, code: str = "", state: str = "",
         return HTMLResponse(f"<h2>Google said no</h2><p>{error}</p>", status_code=400)
     row = await repo.take_state(st.db, state)
     if not row:
-        return HTMLResponse("<h2>This link expired</h2><p>Open /connect in the bot again.</p>",
+        return HTMLResponse("<h2>This sign-in link expired</h2><p>Return to ZC Drive Upload and sign in again.</p>",
+                            status_code=400)
+    if int(row.get("user_id") or 0) < 0 and request.cookies.get("du_oauth_state") != state:
+        return HTMLResponse("<h2>Sign-in could not be verified</h2><p>Restart Google sign-in from this browser.</p>",
                             status_code=400)
     try:
         info = await st.accounts.connect_from_code(row["user_id"], code, row["code_verifier"])
@@ -570,12 +906,23 @@ async def google_callback(request: Request, code: str = "", state: str = "",
     <p><b>{info.get('email') or 'your account'}</b><br>{free} free of {total}</p>
     <p>You can close this tab and go back to Telegram.</p></div>"""
     try:
-        await st.bot.send_message(row["user_id"],
-                                  f"✅ Connected as <b>{info.get('email')}</b> · {free} free of {total}",
-                                  parse_mode="HTML")
+        if int(row["user_id"]) > 0:
+            await st.bot.send_message(row["user_id"],
+                                      f"✅ Connected as <b>{info.get('email')}</b> · {free} free of {total}",
+                                      parse_mode="HTML")
     except Exception:                                       # noqa: BLE001
         pass
-    return HTMLResponse(html)
+    sid = await mint_session(
+        st.db, int(row["user_id"]),
+        request.client.host if request.client else "",
+        request.headers.get("user-agent", ""))
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme).split(",")[0].strip()
+    # Return directly to the private workspace with an explicit success marker so
+    # the dashboard can confirm the Drive connection and show its upload action.
+    response = RedirectResponse("/studio?connected=1", status_code=303)
+    set_session_cookie(response, sid, secure=proto == "https")
+    response.delete_cookie("du_oauth_state", path="/")
+    return response
 
 
 @router.post("/auth/telegram")

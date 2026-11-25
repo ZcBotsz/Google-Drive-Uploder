@@ -147,12 +147,12 @@ async def next_pending_item(db: Database, job_id: str) -> Optional[dict]:
 async def set_item(db: Database, item_id: str, **fields: Any) -> None:
     if not fields:
         return
+    if fields.get("state") == "done":
+        fields.setdefault("finished_at", time.time())
     parts, params = [], []
     for k, v in fields.items():
         if k in ("tg", "drive"):
             v = dumps(v)
-        elif k == "state" and v == "done":
-            fields.setdefault("finished_at", time.time())
         parts.append(f"{k}=?")
         params.append(v)
     params.append(item_id)

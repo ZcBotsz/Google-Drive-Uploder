@@ -32,7 +32,9 @@ class FloodGate:
             if now - last < self.min_gap:
                 self.skipped += 1
                 return False
-            if abs(pct - self._last_pct.get(chat_id, -100.0)) < self.min_pct and pct < 100:
+            # A periodic truthful heartbeat keeps long stalls/waits visible,
+            # without bypassing the per-chat minimum edit interval.
+            if (now - last < 8.0 and abs(pct - self._last_pct.get(chat_id, -100.0)) < self.min_pct and pct < 100):
                 self.skipped += 1
                 return False
         self._last[chat_id] = now
@@ -64,7 +66,7 @@ async def safe_edit(bot, chat_id: int, message_id: int, text: str,
             except TelegramBadRequest as e:
                 msg = str(e).lower()
                 if "message is not modified" in msg:
-                    return False
+                    return True
                 if "no text in the message" in msg or "message can't be edited" in msg:
                     return False
                 raise

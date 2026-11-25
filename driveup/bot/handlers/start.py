@@ -6,7 +6,7 @@ import logging
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery
-from ..ui.buttons import auto as B
+from ..ui.buttons import auto as B, success
 from aiogram.types import InlineKeyboardMarkup as KM
 from aiogram.types import Message
 from aiogram.types import WebAppInfo
@@ -18,7 +18,7 @@ from ...core import naming as naming_mod
 from ...core.naming import NamingOptions
 from ...drive import auth as oauth
 from ...drive.endpoints import parse_folder_id
-from ...strings import esc, t
+from ...strings import esc, sc, t
 from ..keyboards import cb, connect_kb, force_sub_kb, naming_kb, sequence_kb
 from ..ui.stream import stream_reply
 
@@ -43,15 +43,60 @@ async def cmd_start(msg: Message, **data):
     app = app_of(data)
     lang = data["lang"]
     user = data["user"]
-    g = await repo.get_global(app.db)
-    welcome = g.get("welcome_text") or t("welcome", lang, brand=g.get("brand_name", BRAND_NAME))
+    from ...config import BRAND_NAME, effective_max_file_mb
+    cap_mb = effective_max_file_mb(app.cfg)
+    global_settings = await repo.get_global(app.db)
+    drive_account = await repo.get_drive_account(app.db, user["user_id"])
+    current_plan = await repo.effective_plan(app.db, user["user_id"])
+    max_plan = await repo.get_plan(app.db, "max") or {}
+    brand = esc(global_settings.get("brand_name") or BRAND_NAME)
+    price = esc(global_settings.get("plan_price_text") or app.cfg.plan_price_text)
+    support = esc(global_settings.get("support_contact") or app.cfg.support_contact)
+    connected_line = (f"🔗 <b>{sc('DRIVE')}:</b> {esc(drive_account.get('email') or sc('CONNECTED'))}"
+                      if drive_account and not drive_account.get("needs_reconnect")
+                      else f"🔌 <b>{sc('DRIVE')}:</b> {sc('NOT CONNECTED')}")
+    welcome = (
+        f"╭━━━━〔 🚀 <b>{sc(brand)}</b> 🚀 〕━━━━╮\n"
+        f"│  <i>{sc('TELEGRAM · STUDIO · GOOGLE DRIVE')}</i>  │\n"
+        "╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
+        f"👋 <b>{sc('WELCOME')}</b>\n"
+        "Connect Google Drive, send a supported file or link, and follow progress. "
+        "You can also upload directly in the browser Studio.\n\n"
+        f"{connected_line}\n"
+        f"⭐ <b>{sc('PLAN')}:</b> {esc(current_plan.get('name') or current_plan.get('id'))}\n\n"
+        f"🚀 <b>{sc('QUICK FEATURES')}</b>\n"
+        f"• {sc('FOLDERS · BATCHES · FILE NAMING')}\n"
+        f"• {sc('UPLOAD ORDER · THUMBNAILS · STUDIO')}\n"
+        f"• {sc('LIVE PROGRESS · QUEUE · HISTORY · STATS')}\n\n"
+        f"⭐ <b>{sc('MAX')} · {price}</b>\n"
+        f"{sc('UP TO')} {max_plan.get('daily_gb', 750):g} {sc('GB / DAY')} · "
+        f"{max_plan.get('concurrent', 4)} {sc('CONCURRENT JOBS')} · "
+        f"{max_plan.get('max_files_job', 5000):,} {sc('FILES / JOB')}\n"
+        f"📦 {sc('FILE CEILING')}: {cap_mb} MB · "
+        f"{sc('DRIVE QUOTA AND SERVICE LIMITS APPLY')}\n\n"
+        f"💬 {sc('SUPPORT')}: {support}\n"
+        f"<i>{sc('CHOOSE AN ACTION BELOW')}</i>"
+    )
     missing = await app.access.force_sub_missing(user["user_id"])
+    payload = (msg.text or "").partition(" ")[2].strip().lower()
     if missing:
         kb = force_sub_kb(missing)          # must join before anything else
+    elif payload == "studio":
+        # Landing-page CTA deep-links back into Telegram, then gives the user
+        # a fresh signed link to the private Studio workspace.
+        kb = KM(inline_keyboard=[[
+            success("Open Upload Studio", icon="🌐",
+                    url=app.studio_url(user_id=user["user_id"]))
+        ]])
     else:
         # Every command is a button — nobody should have to remember /syntax.
         from ..menus import quick_kb
-        kb = quick_kb(is_admin=data.get("role") in ("owner", "admin", "support"))
+        is_admin = data.get("role") in ("owner", "admin", "support") or await repo.is_admin(
+            app.db, user["user_id"], app.cfg.owner_id)
+        kb = quick_kb(is_admin=is_admin,
+                      is_connected=bool(drive_account and not drive_account.get("needs_reconnect")))
+    from ..ui import emoji as animated
+    welcome = animated.apply(welcome, app.cfg, global_settings)
     await msg.answer(welcome, reply_markup=kb)
     await repo.audit(app.db, user["user_id"], "bot.start")
     await app.log_event("#NewUser", {"id": user["user_id"], "name": user.get("name", "")})
@@ -125,6 +170,91 @@ async def cmd_copy(msg: Message, **data):
                                "Nothing was changed.")
 
 
+# Confirmation snapshots are deliberately process-local, user-bound and short-lived.
+_protection_previews: dict = {}
+
+
+@router.message(Command("protect"))
+async def cmd_protect(msg: Message, **data):
+    """Preview a recursive, non-sharing-changing download restriction."""
+    import secrets
+    import time
+    if msg.chat.type != "private":
+        return await msg.answer("For privacy, send /protect in a private chat with the bot.")
+    app, uid = app_of(data), msg.from_user.id
+    if not await repo.get_drive_account(app.db, uid):
+        return await msg.answer("Connect Google Drive first — send /connect.")
+    from ...drive.client import folder_id_from_url
+    parts = (msg.text or "").split(maxsplit=1)
+    fid = folder_id_from_url(parts[1]) if len(parts) > 1 else ""
+    if not fid:
+        return await msg.answer("Send <code>/protect YOUR_FOLDER_LINK</code> to preview protection of existing files and subfolders.")
+    status = await msg.answer("Scanning folder and subfolders. No changes yet…")
+    try:
+        client = await app.accounts.client(uid)
+        meta = await client.get(fid)
+        files = await client.protection_inventory(fid)
+    except Exception as e:
+        log.warning("protection scan failed: %s", e)
+        return await status.edit_text("Could not scan this folder. No files were changed. Check access, OAuth scope, and the 2,000-item safety limit.")
+    if not files:
+        return await status.edit_text("No eligible files found. Shortcuts are not followed; no changes were made.")
+    now = time.monotonic()
+    for key, value in list(_protection_previews.items()):
+        if value["expires"] < now:
+            _protection_previews.pop(key, None)
+    token = secrets.token_urlsafe(12)
+    _protection_previews[token] = {"uid": uid, "files": files, "expires": now + 600}
+    kb = KM(inline_keyboard=[[B("Apply protection", callback_data=f"prot:{token}"),
+                              B("Cancel", callback_data=f"protx:{token}")]])
+    await status.edit_text(
+        f"<b>Protection preview</b>\nFolder: {esc(meta.get('name', 'folder'))}\n"
+        f"Files found: <b>{len(files)}</b> (including subfolders). Shortcuts are skipped.\n\n"
+        "This attempts to restrict download, copy and print for readers and writers. "
+        "It does not remove existing sharing. Some files may fail if you lack permission. "
+        "Confirm within 10 minutes.", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("protx:"))
+async def cancel_protection(cbq: CallbackQuery, **data):
+    token = (cbq.data or "").split(":", 1)[1]
+    preview = _protection_previews.get(token)
+    if not preview or preview["uid"] != cbq.from_user.id:
+        return await cbq.answer("Preview expired or belongs to another user.", show_alert=True)
+    _protection_previews.pop(token, None)
+    await cbq.answer("Cancelled")
+    await cbq.message.edit_text("Cancelled. No files were changed.")
+
+
+@router.callback_query(F.data.startswith("prot:"))
+async def apply_protection(cbq: CallbackQuery, **data):
+    import time
+    token = (cbq.data or "").split(":", 1)[1]
+    preview = _protection_previews.get(token)
+    if not preview or preview["uid"] != cbq.from_user.id or preview["expires"] < time.monotonic():
+        return await cbq.answer("Preview expired or belongs to another user. Run /protect again.", show_alert=True)
+    _protection_previews.pop(token, None)  # one-shot; concurrent clicks cannot duplicate work
+    await cbq.answer("Applying protection")
+    await cbq.message.edit_text("Applying protection. Please wait…")
+    client = await app_of(data).accounts.client(cbq.from_user.id)
+    ok, failures = 0, []
+    for f in preview["files"]:
+        try:
+            await client.restrict_downloads(f["id"])
+            ok += 1
+        except Exception as e:
+            log.warning("protect failed for %s: %s", f["id"], e)
+            failures.append(f)
+    lines = [f"✅ Protected: <b>{ok}</b>", f"❌ Failed: <b>{len(failures)}</b>"]
+    if failures:
+        lines.append("Some files could not be protected. Check ownership, permissions and OAuth scope, then run /protect again.")
+        lines += [f"• {esc(f['name'][:80])} (<code>{esc(f['id'])}</code>)" for f in failures[:10]]
+        if len(failures) > 10:
+            lines.append(f"…and {len(failures)-10} more.")
+    lines.append("Existing sharing is unchanged. Screenshots and external recording cannot be prevented.")
+    await cbq.message.edit_text("\n".join(lines))
+
+
 @router.message(Command("help"))
 async def cmd_help(msg: Message, **data):
     app = app_of(data)
@@ -160,6 +290,7 @@ carries it as the Drive preview image. /thumb shows it, /delthumb removes it.
 /disconnect · unlink Drive
 /account · plan, quota and Drive status
 /copy · duplicate a Drive file or folder (no download)
+/protect · restrict downloads for files in a Drive folder
 /thumb_set · set your custom upload thumbnail
 /delthumb · remove it
 /storage · how much Google Drive space is left
@@ -264,19 +395,27 @@ async def cmd_account(msg: Message, **data):
     try:
         client = await app.accounts.client(uid)
         about = await client.about()
-        free = human_bytes(about["free"]) if about["free"] >= 0 else "unlimited"
-        total = human_bytes(about["limit"]) if about["limit"] else "—"
+        total = human_bytes(about["limit"]) if about["limit"] else "no fixed limit reported"
+        total_used = human_bytes(about["usage"]) if about.get("usage_reported") else "not reported"
+        drive_used = human_bytes(about["drive_used"]) if about.get("drive_used") is not None else "not reported"
+        other_used = human_bytes(about["other_services_used"]) if about.get("other_services_used") is not None else "not reported"
+        display_name = about.get("name") or ""
+        free = human_bytes(about["free"]) if about["free"] >= 0 else "not reported"
     except Exception as e:                                # noqa: BLE001
-        free, total = "?"
+        total, total_used, drive_used, other_used, free, display_name = "?", "?", "?", "?", "?", ""
 
     lines = [
-        f"<b>👤 Account</b>",
-        f"📧 {esc(acc['email'])}" + ("  ⚠️ reconnect" if acc.get("needs_reconnect") else ""),
-        f"💾 free: <b>{free}</b> of {total}",
-        f"💎 plan: <b>{esc(plan.get('name') or plan.get('id'))}</b>"
-        + (f" · till {unlock_at_text(plan['expires_at'], app.cfg.timezone)}" if plan.get("expires_at") else ""),
-        f"📅 today: {human_bytes(usage['bytes'])} / {plan.get('daily_gb')} GB",
-        f"🔐 scope: {'full Drive' if app.cfg.scope_mode_full else 'app-created files only'}",
+        f"<b>👤 {sc('ACCOUNT OVERVIEW')}</b>",
+        (f"📛 {sc('NAME')}: <b>{esc(display_name)}</b>\n" if display_name else "") +
+        f"📧 {sc('GOOGLE ACCOUNT')}: <b>{esc(acc['email'])}</b>" + (f"  ⚠️ {sc('RECONNECT NEEDED')}" if acc.get("needs_reconnect") else ""),
+        f"💾 {sc('TOTAL GOOGLE STORAGE')}: <b>{total_used} used</b> / {total}",
+        f"📁 {sc('DRIVE FILES')}: <b>{drive_used} used</b>",
+        f"🌐 {sc('OTHER GOOGLE SERVICES')}: <b>{other_used} combined</b>\n<i>{sc('GMAIL AND PHOTOS ARE NOT SPLIT OUT BY THIS API')}</i>",
+        f"🆓 {sc('AVAILABLE')}: <b>{free}</b>",
+        f"💎 {sc('PLAN')}: <b>{esc(plan.get('name') or plan.get('id'))}</b>"
+        + (f" · {sc('UNTIL')} {unlock_at_text(plan['expires_at'], app.cfg.timezone)}" if plan.get("expires_at") else ""),
+        f"📅 {sc('TODAY')}: {human_bytes(usage['bytes'])} / {plan.get('daily_gb')} GB",
+        f"🔐 {sc('DRIVE ACCESS')}: {'full Drive' if app.cfg.scope_mode_full else 'app-created files only'}",
     ]
     if lock:
         lines.append(f"🔒 locked until {unlock_at_text(lock['expires_at'], app.cfg.timezone)}")

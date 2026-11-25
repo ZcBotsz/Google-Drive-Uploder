@@ -15,6 +15,7 @@ import hmac
 import json
 import os
 import tempfile
+from pathlib import Path
 import time
 from urllib.parse import urlencode
 
@@ -107,7 +108,18 @@ async def make_job(web, user_id: int = 55, files=(("a.bin", b"1234"),)) -> str:
     return job_id
 
 
-# ── auth ───────────────────────────────────────────────────────────────────
+# ── public pages and auth ──────────────────────────────────────────────────
+async def test_root_opens_studio_and_public_home_is_separate(web):
+    r = await web["client"].get("/", follow_redirects=False)
+    assert r.status_code == 307 and r.headers["location"] == "/studio"
+    home = await web["client"].get("/home")
+    assert home.status_code == 200 and "UPLOAD IN STUDIO" in home.text
+    assert 'href="/studio"' in home.text
+    studio = await web["client"].get("/studio")
+    assert "Continue with Google Drive" in studio.text
+    assert "Other regular users cannot access your jobs or files" in studio.text
+
+
 async def test_no_session_is_rejected(web):
     r = await web["client"].get("/api/me")
     assert r.status_code == 401
@@ -147,10 +159,86 @@ async def test_job_payload_and_ownership(web):
     job_id = await make_job(web)
     r = await c.get(f"/api/jobs/{job_id}")
     assert r.status_code == 200 and r.json()["id"] == job_id
-    # another user cannot see it
+    # Another ordinary user cannot read, patch, cancel, or export this job.
     c2 = await login(web, 77)
-    r2 = await c2.get(f"/api/jobs/{job_id}")
-    assert r2.status_code == 404
+    assert (await c2.get(f"/api/jobs/{job_id}")).status_code == 404
+    assert (await c2.patch(f"/api/jobs/{job_id}", json={"naming": {"template": "x"}})).status_code == 404
+    assert (await c2.post(f"/api/jobs/{job_id}/cancel")).status_code == 404
+    assert (await c2.get(f"/api/jobs/{job_id}/export.csv")).status_code == 404
+
+
+async def test_private_history_is_session_scoped(web):
+    assert (await web["client"].get("/api/jobs")).status_code == 401
+    owner = await login(web, 55)
+    own_job = await make_job(web, 55, files=(("private-a.mp4", b"a"),))
+    other_job = await make_job(web, 77, files=(("private-b.mp4", b"b"),))
+    rows = (await owner.get("/api/jobs")).json()["jobs"]
+    ids = {row["id"] for row in rows}
+    assert own_job in ids and other_job not in ids
+    assert all("private-b" not in str(row) for row in rows)
+
+
+async def test_batch_folder_counts_assign_every_selected_file(web):
+    client = await login(web)
+    names = tuple((f"video-{i:02}.mp4", bytes([i]) * 4) for i in range(20))
+    job_id = await make_job(web, files=names)
+    items = await repo.items_of(web["db"], job_id)
+    groups = [("Folder 1", 1), ("Folder 2", 9), ("Folder 3", 5), ("Folder 4", 5)]
+    plan, cursor = {}, 0
+    for name, count in groups:
+        for item in items[cursor:cursor + count]:
+            plan[item["id"]] = [name]
+        cursor += count
+    bad = await client.patch(f"/api/jobs/{job_id}", json={"destination": {
+        "folder_id": "root", "path": "My Drive", "split": {
+            "mode": "batches", "groups": [{"name": n, "count": c} for n, c in groups[:-1]],
+            "plan": plan}}})
+    assert bad.status_code == 422
+    good = await client.patch(f"/api/jobs/{job_id}", json={"destination": {
+        "folder_id": "root", "path": "My Drive", "split": {
+            "mode": "batches", "groups": [{"name": n, "count": c} for n, c in groups],
+            "plan": plan}}})
+    assert good.status_code == 200, good.text
+    saved = good.json()["destination"]["split"]
+    assert saved["groups"] == [{"name": n, "count": c} for n, c in groups]
+    assert list(saved["plan"].values()).count(["Folder 1"]) == 1
+    assert list(saved["plan"].values()).count(["Folder 2"]) == 9
+    assert list(saved["plan"].values()).count(["Folder 3"]) == 5
+    assert list(saved["plan"].values()).count(["Folder 4"]) == 5
+    await repo.save_drive_account(web["db"], 55, email="batch@example.test",
+                                  enc_refresh=TokenCipher(web["cfg"].fernet_key()).enc("1//r"),
+                                  access="ya29.fake", expiry=9e12, scope="s", scope_mode="file")
+    drive = await web["accounts"].client(55)
+    saved_job = await repo.get_job(web["db"], job_id)
+    for item in items:
+        folder = await web["worker"]._folder_for(saved_job, item, drive)
+        expected = saved["plan"][item["id"]][0]
+        assert folder["path"].endswith(expected)
+
+
+async def test_active_job_poll_returns_fresh_progress_totals(web):
+    client = await login(web)
+    job_id = await make_job(web, files=(("poll.bin", b"a" * 100),))
+    item = (await repo.items_of(web["db"], job_id))[0]
+    await repo.update_job(web["db"], job_id, status="running")
+    await repo.set_item(web["db"], item["id"], state="uploading", bytes_done=42)
+    response = await client.get(f"/api/jobs/{job_id}")
+    assert response.status_code == 200
+    assert response.json()["totals"]["bytes_done"] == 42
+
+
+async def test_worker_checkpoint_publishes_live_progress_to_studio(web):
+    from driveup.core.progress import ProgressState
+    job_id = await make_job(web)
+    item = (await repo.items_of(web["db"], job_id))[0]
+    state = ProgressState(job_id=job_id, item_id=item["id"], name="video.mp4", total=200)
+    queue = web["worker"].hub.subscribe(job_id)
+    checkpoint = web["worker"]._checkpoint(item["id"], state.on_drive, {}, state)
+    await checkpoint(80, 200)
+    event = await queue.get()
+    assert event["stage"] == "uploading" and event["drive_pct"] == 40.0
+    assert (await repo.get_item(web["db"], item["id"]))["bytes_done"] == 80
+    web["worker"].hub.unsubscribe(job_id, queue)
 
 
 async def test_patch_updates_destination_and_names(web):
@@ -222,6 +310,41 @@ async def test_start_requires_drive_connection(web):
     r = await c.post(f"/api/jobs/{job_id}/start", json={})
     assert r.status_code == 403
     assert "not_connected" in r.json()["code"] or "connect" in r.json()["message"].lower()
+
+
+async def test_browser_upload_is_private_and_uses_the_existing_worker(web):
+    unauthenticated = await web["client"].post("/api/uploads", files=[
+        ("files", ("blocked.bin", b"no session", "application/octet-stream"))])
+    assert unauthenticated.status_code == 401
+    owner = await login(web, 55)
+    await repo.save_drive_account(web["db"], 55, email="web@example.test",
+                                  enc_refresh=TokenCipher(web["cfg"].fernet_key()).enc("1//r"),
+                                  access="ya29.fake", expiry=9e12, scope="s", scope_mode="file")
+    response = await owner.post("/api/uploads", files=[
+        ("files", ("from-browser.bin", b"browser bytes", "application/octet-stream"))])
+    assert response.status_code == 200, response.text
+    job = response.json()["job"]
+    assert job["items"][0]["name"] == "from-browser.bin"
+    item = await repo.get_item(web["db"], job["items"][0]["id"])
+    staged = Path(item["tg"]["source_path"])
+    assert staged.is_file() and staged.read_bytes() == b"browser bytes"
+    async with AsyncClient(transport=ASGITransport(app=web["app"]), base_url="http://testserver") as other:
+        await other.post("/auth/telegram", json={"initData": sign_initdata(77)})
+        denied = await other.post("/api/uploads", data={"job_id": job["id"]}, files=[
+            ("files", ("intruder.bin", b"not mine", "application/octet-stream"))])
+        assert denied.status_code == 404
+    assert staged.read_bytes() == b"browser bytes"
+    start = await owner.post(f"/api/jobs/{job['id']}/start", json={})
+    assert start.status_code == 200
+    for _ in range(300):
+        current = (await owner.get(f"/api/jobs/{job['id']}")).json()
+        if current["status"] in ("done", "failed"):
+            break
+        await _sleep(0.05)
+    current = (await owner.get(f"/api/jobs/{job['id']}")).json()
+    assert current["status"] == "done"
+    assert not staged.exists()
+    assert web["fd"].uploaded
 
 
 async def test_full_upload_through_the_api(web):
@@ -431,14 +554,32 @@ async def test_admin_pages_render(web):
     assert "DriveUp" in r.text and "Dashboard" in r.text
 
 
-async def test_index_without_session_explains_how_to_open(web):
-    r = await web["client"].get("/")
-    assert r.status_code == 200 and "/studio" in r.text
+async def test_homepage_shows_the_zc_driveup_landing_site(web):
+    r = await web["client"].get("/home")
+    assert r.status_code == 200
+    assert "ZC DRIVE UPLOAD" in r.text and "Send it once." in r.text
+    assert "Browser → Server" in r.text and "Server → Drive" in r.text
+    assert 'href="/studio"' in r.text
+    assert "₹499" in r.text and "up to 750 GB/day" in r.text
+    assert "/studio" in r.text and "@ZCQXx" in r.text
 
 
-async def test_index_with_session_serves_the_studio(web):
+async def test_google_web_login_starts_without_telegram_session(web):
+    r = await web["client"].get("/auth/google/login", follow_redirects=False)
+    assert r.status_code == 303
+    assert "accounts.google.com" in r.headers["location"] or "googleapis.com" in r.headers["location"]
+    assert "du_oauth_state" in r.headers.get("set-cookie", "")
+
+
+async def test_studio_without_session_offers_direct_google_login(web):
+    r = await web["client"].get("/studio")
+    assert r.status_code == 200 and "Continue with Google Drive" in r.text
+    assert "/auth/google/login" in r.text
+
+
+async def test_studio_with_session_serves_the_upload_workspace(web):
     c = await login(web)
-    r = await c.get("/")
+    r = await c.get("/studio")
     assert r.status_code == 200 and "DriveUp Studio" in r.text and "splash" in r.text
 
 
@@ -579,3 +720,163 @@ def test_public_url_with_trailing_slash_is_trimmed(monkeypatch):
         monkeypatch.setenv(k, v)
     # no double slash in the generated callback
     assert Settings().redirect_uri == "https://a.example.com/auth/google/callback"
+
+
+async def test_dashboard_stats_are_session_scoped(web):
+    client = await login(web, 55)
+    own = await make_job(web, 55, files=(("mine.bin", b"1234"),))
+    other = await make_job(web, 77, files=(("other.bin", b"123456789"),))
+    own_item = (await repo.items_of(web["db"], own))[0]
+    other_item = (await repo.items_of(web["db"], other))[0]
+    await repo.set_item(web["db"], own_item["id"], state="done")
+    await repo.set_item(web["db"], other_item["id"], state="done")
+    assert (await repo.get_item(web["db"], own_item["id"]))["finished_at"] > 0
+    response = await client.get("/api/me")
+    assert response.status_code == 200
+    assert response.json()["upload_stats"]["files"] == 1
+    assert response.json()["upload_stats"]["bytes"] == 4
+    assert "other.bin" not in response.text
+
+
+async def test_oauth_public_information_pages_no_session(web):
+    client = web['client']
+    for path, heading in [('/home', 'ZC Drive Upload'), ('/privacy', 'Privacy Policy'), ('/terms', 'Terms of Service')]:
+        response = await client.get(path)
+        assert response.status_code == 200
+        assert heading.lower() in response.text.lower()
+        assert '<html' in response.text.lower()
+        assert '@ZCQXx' in response.text
+    home = (await client.get('/home')).text
+    assert 'href="/privacy"' in home and 'href="/terms"' in home
+    privacy = (await client.get('/privacy')).text
+    assert 'Google API Services User Data Policy' in privacy
+    assert 'dump channel' in privacy.lower() and 'retention' in privacy.lower()
+    studio = (await client.get('/studio')).text
+    assert 'href="/privacy"' in studio and 'href="/terms"' in studio
+    assert (await client.get('/api/me')).status_code == 401
+
+async def test_selected_folder_routes_are_arbitrary_validated_and_owned(web):
+    client = await login(web)
+    job_id = await make_job(web, files=tuple((f"file-{i}.bin", b'x') for i in range(7)))
+    await repo.save_drive_account(web["db"], 55, email="routes@example.test",
+        enc_refresh=TokenCipher(web["cfg"].fernet_key()).enc("1//r"),
+        access="ya29.fake", expiry=9e12, scope="s", scope_mode="file")
+    items = await repo.items_of(web["db"], job_id)
+    a = web['fd'].add_folder('First')
+    b = web['fd'].add_folder('Second')
+    plan = {item['id']: a if i in (1, 5) else b for i, item in enumerate(items)}
+    async def patch(mapping):
+        return await client.patch(f'/api/jobs/{job_id}', json={'destination': {
+            'id': 'root', 'split': {'mode': 'selected', 'plan': mapping}}})
+    assert (await patch(dict(list(plan.items())[:-1]))).status_code == 422
+    assert (await patch({**plan, 'foreign-item': a})).status_code == 422
+    assert (await patch({**plan, items[0]['id']: 'unknown'})).status_code == 422
+    web['fd'].files[a]['capabilities'] = {'canAddChildren': False}
+    assert (await patch(plan)).status_code == 422
+    web['fd'].files[a]['capabilities'] = {'canAddChildren': True}
+    response = await patch(plan)
+    assert response.status_code == 200, response.text
+    split = response.json()['destination']['split']
+    assert split['plan'] == plan
+    assert split['destinations'] == {a: 'First', b: 'Second'}
+    saved_job = await repo.get_job(web['db'], job_id)
+    drive = await web['accounts'].client(55)
+    for item in items:
+        target = await web['worker']._folder_for(saved_job, item, drive)
+        assert target['folder_id'] == plan[item['id']]
+    await login(web, 56)
+    assert (await patch(plan)).status_code == 404
+
+async def test_manual_tree_routes_validation_and_worker(web):
+    client = await login(web)
+    job_id = await make_job(web, files=tuple((f'file-{i}.bin', b'x') for i in range(4)))
+    await repo.save_drive_account(web['db'], 55, email='tree@example.test',
+        enc_refresh=TokenCipher(web['cfg'].fernet_key()).enc('1//r'),
+        access='ya29.fake', expiry=9e12, scope='s', scope_mode='file')
+    items = await repo.items_of(web['db'], job_id)
+    folders = [['Course'], ['Course', 'Module'], ['Empty']]
+    plan = {items[0]['id']: [], items[1]['id']: ['Course'],
+            items[2]['id']: ['Course', 'Module'], items[3]['id']: ['Course', 'Module']}
+    async def patch(folder_list, routes, parent='root'):
+        return await client.patch(f'/api/jobs/{job_id}', json={'destination': {
+            'id': parent, 'path': 'My Drive', 'split': {'mode': 'tree', 'folders': folder_list, 'plan': routes}}})
+    assert (await patch(folders, {**plan, 'other-user-file': []})).status_code == 422
+    assert (await patch(folders[1:], plan)).status_code == 422
+    assert (await patch(folders + [['bad/name']], plan)).status_code == 422
+    assert (await patch(folders, {**plan, items[0]['id']: ['Missing']})).status_code == 422
+    assert (await patch(folders, plan, 'missing-parent')).status_code == 422
+    response = await patch(folders, plan)
+    assert response.status_code == 200, response.text
+    saved = response.json()['destination']['split']
+    assert saved['plan'] == plan and sorted(saved['folders']) == sorted(folders)
+    job = await repo.get_job(web['db'], job_id)
+    drive = await web['accounts'].client(55)
+    root = await web['worker']._folder_for(job, items[0], drive)
+    one = await web['worker']._folder_for(job, items[1], drive)
+    nested = await web['worker']._folder_for(job, items[2], drive)
+    assert root['folder_id'] == 'root'
+    assert web['fd'].files[nested['folder_id']]['parents'] == [one['folder_id']]
+    assert (await web['worker']._folder_for(job, items[3], drive))['folder_id'] == nested['folder_id']
+    await login(web, 56)
+    assert (await patch(folders, plan)).status_code == 404
+
+async def test_shared_with_me_folders_are_paginated_and_session_protected(web):
+    assert (await web['client'].get('/api/drive/shared-folders')).status_code == 401
+    c = await login(web)
+    assert (await c.get('/api/drive/shared-folders')).status_code == 409
+    await repo.save_drive_account(web['db'], 55, email='shared@example.test',
+        enc_refresh=TokenCipher(web['cfg'].fernet_key()).enc('1//r'),
+        access='ya29.fake', expiry=9e12, scope='drive', scope_mode='full')
+    private = web['fd'].add_folder('Private folder')
+    ids = []
+    for i in range(105):
+        fid = web['fd'].add_folder(f'Shared {i:03}')
+        web['fd'].files[fid]['sharedWithMe'] = True
+        web['fd'].files[fid]['capabilities'] = {'canAddChildren': i != 0}
+        ids.append(fid)
+    first = await c.get('/api/drive/shared-folders')
+    assert first.status_code == 200
+    body = first.json()
+    assert len(body['folders']) == 100 and body['next']
+    assert private not in {f['id'] for f in body['folders']}
+    assert body['folders'][0]['capabilities']['canAddChildren'] is False
+    second = await c.get('/api/drive/shared-folders', params={'page': body['next']})
+    assert len(second.json()['folders']) == 5 and not second.json()['next']
+    assert {f['id'] for f in body['folders'] + second.json()['folders']} == set(ids)
+    await login(web, 56)
+    assert (await c.get('/api/drive/shared-folders')).status_code == 409
+
+async def test_tree_can_route_to_existing_private_and_shared_folders(web):
+    c = await login(web)
+    jid = await make_job(web, files=tuple((f'video{i}.mp4',b'x') for i in range(3)))
+    await repo.save_drive_account(web['db'], 55, email='tree@example.test',
+        enc_refresh=TokenCipher(web['cfg'].fernet_key()).enc('1//r'),
+        access='ya29.fake', expiry=9e12, scope='drive', scope_mode='full')
+    items = await repo.items_of(web['db'],jid)
+    shared = web['fd'].add_folder('Shared folder')
+    my = web['fd'].add_folder('My folder')
+    web['fd'].files[shared]['sharedWithMe'] = True
+    web['fd'].files[shared]['capabilities'] = {'canAddChildren':True}
+    plan = {i['id']:[] for i in items}
+    routes = {items[0]['id']:shared, items[1]['id']:my}
+    async def patch(folders, assignments, file_plan=plan):
+        return await c.patch(f'/api/jobs/{jid}',json={'destination':{'id':'root','split':{
+            'mode':'tree','folders':[], 'plan':file_plan, 'existing_folders':folders,'existing_plan':assignments}}})
+    assert (await patch({shared:'Shared'}, {**routes, 'foreign':shared})).status_code == 422
+    assert (await patch({shared:'Shared'}, {items[0]['id']:'unknown'})).status_code == 422
+    assert (await patch({'unknown':'Missing'}, {items[0]['id']:'unknown'})).status_code == 422
+    web['fd'].files[shared]['capabilities']['canAddChildren'] = False
+    assert (await patch({shared:'Shared'}, {items[0]['id']:shared})).status_code == 422
+    web['fd'].files[shared]['capabilities']['canAddChildren'] = True
+    response = await patch({shared:'Fake label', my:'Another label'}, routes)
+    assert response.status_code == 200, response.text
+    split=response.json()['destination']['split']
+    assert split['existing_plan']==routes
+    assert split['existing_folders']=={shared:'Shared folder',my:'My folder'}
+    drive = await web['accounts'].client(55)
+    job = await repo.get_job(web['db'],jid)
+    assert (await web['worker']._folder_for(job,items[0],drive))['folder_id']==shared
+    assert (await web['worker']._folder_for(job,items[1],drive))['folder_id']==my
+    assert (await web['worker']._folder_for(job,items[2],drive))['folder_id']=='root'
+    await login(web,56)
+    assert (await patch({shared:'Shared'}, {items[0]['id']:shared})).status_code == 404

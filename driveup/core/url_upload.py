@@ -28,13 +28,17 @@ from ..drive.upload import _fire
 
 
 async def _pump(http, url: str, queue: asyncio.Queue, info: dict, state,
-                limit: int, errors: list) -> None:
+                limit: int, errors: list, publish=None) -> None:
     """Read the URL and push chunks; always closes the queue, even on failure."""
+    done = 0
     try:
         async for piece in fetch.stream_url(http, url, chunk=1 << 20,
                                             max_bytes=limit,
                                             should_stop=state.want_stop, info=info):
-            await _fire(state.on_tg, len(piece), info.get("total") or limit)
+            done += len(piece)
+            await _fire(state.on_tg, done, info.get("total") or limit)
+            if publish:
+                publish(state)
             await queue.put(piece)
         await queue.put(None)
     except BaseException as e:                 # noqa: BLE001
@@ -66,12 +70,16 @@ async def upload_from_url(worker, job: dict, item: dict, state) -> dict:
     errors: list = []
     queue: asyncio.Queue = asyncio.Queue(maxsize=4)
 
+    async def report_drive(done, total):
+        state.on_drive(done, total)
+        worker.hub.put(state)
+
     up = client.uploader(chunk=worker.cfg.chunk_bytes,
-                         on_progress=state.on_drive,
+                         on_progress=report_drive,
                          should_cancel=state.want_stop)
 
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as http:
-        task = asyncio.create_task(_pump(http, url, queue, info, state, limit, errors))
+        task = asyncio.create_task(_pump(http, url, queue, info, state, limit, errors, worker.hub.put))
         try:
             # The size only exists in the response headers, so wait for them.
             for _ in range(600):                       # ≤30 s

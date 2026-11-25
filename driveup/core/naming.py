@@ -329,6 +329,26 @@ def dedupe_names(names: List[str], policy: str = "rename") -> Dict[int, str]:
     return out
 
 
+def dedupe_job_names(names: List[str], items: List[dict], job: dict, policy: str = "rename") -> Dict[int, str]:
+    """For a manual tree, conflicts only occur among files in the same folder."""
+    split = ((job.get("destination") or {}).get("split") or {})
+    if split.get("mode") != "tree":
+        return dedupe_names(names, policy)
+    buckets = {}
+    for i, item in enumerate(items):
+        fid = (split.get("existing_plan") or {}).get(item["id"])
+        root = (job.get("destination") or {}).get("folder_id") or "root"
+        key = (("\x00existing", fid) if fid and fid != root else
+               tuple((split.get("plan") or {}).get(item["id"], [])))
+        buckets.setdefault(key, []).append(i)
+    result = {}
+    for indexes in buckets.values():
+        resolved = dedupe_names([names[i] for i in indexes], policy)
+        for local, index in enumerate(indexes):
+            result[index] = resolved[local]
+    return result
+
+
 def preview_rows(items: List[dict], opt: NamingOptions, start: int = 1) -> List[dict]:
     """What the Studio's step-3 table shows: original → new (+ conflict flag)."""
     total = len(items)
@@ -337,13 +357,22 @@ def preview_rows(items: List[dict], opt: NamingOptions, start: int = 1) -> List[
         names.append(build_name(original=it.get("name", "file"), mime=it.get("mime", ""),
                                 seq=start + (i - 1) * opt.step, index=i, total=total, opt=opt,
                                 size=it.get("size", 0), caption=it.get("caption", "")))
-    resolved = dedupe_names(names, "rename")
+    # Optional folder keys let manual-tree previews match per-folder conflicts.
+    buckets = {}
+    for i, it in enumerate(items):
+        buckets.setdefault(tuple(it.get("folder_key") or []), []).append(i)
+    resolved = {}
+    for indexes in buckets.values():
+        local = dedupe_names([names[i] for i in indexes], "rename")
+        for j, index in enumerate(indexes):
+            resolved[index] = local[j]
     seen = set()
     rows = []
     for i, (it, name) in enumerate(zip(items, names), 1):
         final = resolved.get(i - 1) or name
-        dup = name.lower() in seen
-        seen.add(name.lower())
+        key = (tuple(it.get("folder_key") or []), name.lower())
+        dup = key in seen
+        seen.add(key)
         rows.append({"index": i, "original": it.get("name", ""), "final": final,
                      "size": it.get("size", 0), "duplicate": dup,
                      "truncated": byte_len(final) >= opt.max_bytes})

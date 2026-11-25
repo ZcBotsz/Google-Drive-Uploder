@@ -29,6 +29,20 @@ from ..tg.ratelimit import safe_edit
 log = logging.getLogger("driveup.animator")
 
 
+def progress_markup(state, cfg, chat_id):
+    """Keep controls visible; never put a signed private link into a group chat."""
+    from ..bot.keyboards import progress_kb
+    url = ""
+    uid = getattr(state, "user_id", 0)
+    if uid and int(chat_id) == int(uid) and getattr(cfg, "session_secret", ""):
+        from .links import mint_token
+        base = getattr(cfg, "public_url", "").rstrip("/")
+        if base.startswith("https://"):
+            token = mint_token(cfg.session_secret, uid, job_id=state.job_id)
+            url = f"{base}/start?t={token}&job={state.job_id}"
+    return progress_kb(state.job_id, paused=bool(state.paused), studio_url=url)
+
+
 class Animator:
     """Keeps one Telegram message in step with one ProgressState."""
 
@@ -57,14 +71,17 @@ class Animator:
             overall_pct=s.overall_pct, frame=self.frame,
             style=getattr(self.cfg, "progress_style", "glow"),
             paused=bool(getattr(s, "paused", False)),
-            stage_label=self._stage_label(),
+            stage_label=self._stage_label(), source_label=s.source_label,
+            tg_done=s.tg_done, drive_done=s.drive_done, detail=s.detail,
         )
         return emoji_ui.apply(text, self.cfg)
 
     def _stage_label(self) -> str:
         stage = getattr(self.state, "stage", "") or ""
         return {
-            "downloading": "FETCHING FROM TELEGRAM",
+            "preparing": "PREPARING TRANSFER",
+            "downloading": "DOWNLOADING TO SERVER",
+            "transferring": "DOWNLOADING AND UPLOADING",
             "uploading": "UPLOADING TO DRIVE",
             "paused": "PAUSED",
             "done": "DONE",
@@ -94,7 +111,8 @@ class Animator:
                 # paused too (a real pause).
                 if text != last:
                     ok = await safe_edit(self.bot, self.chat_id, self.message_id, text,
-                                         gate=self.gate, pct=self.state.drive_pct)
+                                         reply_markup=progress_markup(self.state, self.cfg, self.chat_id),
+                                         gate=self.gate, pct=(self.state.tg_pct + self.state.drive_pct) / 2)
                     if ok:
                         self.edits += 1
                         last = text
@@ -110,6 +128,7 @@ class Animator:
         """Draw one last frame, bypassing the throttle (100 % must be shown)."""
         with contextlib.suppress(Exception):
             await safe_edit(self.bot, self.chat_id, self.message_id, self.render(),
+                            reply_markup=progress_markup(self.state, self.cfg, self.chat_id),
                             gate=self.gate, pct=100.0, force=True)
 
 

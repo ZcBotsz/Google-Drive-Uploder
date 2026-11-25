@@ -47,7 +47,7 @@ from .thumbs import apply_thumb
 from ..drive.errors import (AuthExpired, DailyLimit, DriveError, NetworkError,
                             RateLimited, SessionGone, StorageQuota)
 from ..strings import esc
-from .naming import NamingOptions, build_name, dedupe_names, human_size
+from .naming import NamingOptions, build_name, dedupe_names, dedupe_job_names, human_size
 from .progress import ProgressHub, ProgressState
 
 log = logging.getLogger("driveup.worker")
@@ -120,8 +120,8 @@ class Worker:
             try:
                 await asyncio.sleep(20)
                 for job_id, st in list(self.hub.current.items()):
-                    if st.stage in ("uploading", "downloading") and not st.paused:
-                        last = max((t for t, _ in st.meter.samples), default=st.started)
+                    if st.stage in ("uploading", "downloading", "transferring") and not st.paused:
+                        last = max((t for t, _ in (st.meter.samples + st.drive_meter.samples)), default=st.started_monotonic)
                         if time.monotonic() - last > self.cfg.stall_seconds:
                             log.warning("job %s stalled — cancelling the task", job_id)
                             ev = self._cancel_flags.get(job_id)
@@ -214,7 +214,7 @@ class Worker:
                                     opt=opt, size=tg.get("size", 0),
                                     caption=tg.get("caption", ""),
                                     message_id=tg.get("msg_id", 0)))
-        resolved = dedupe_names(names, job.get("conflict_policy") or "rename")
+        resolved = dedupe_job_names(names, items, job, job.get("conflict_policy") or "rename")
         for i, it in enumerate(items):
             # '' means "skip" (conflict_policy=skip) — it must NOT fall back to
             # the duplicate name, or the skipped file gets uploaded anyway.
@@ -224,6 +224,10 @@ class Worker:
 
     # ── the job ──────────────────────────────────────────────────────────
     async def _run_job(self, job_id: str) -> None:
+        # Defense in depth: no worker may process an unsealed channel batch.
+        if await self.db.one("SELECT job_id FROM channel_batches WHERE job_id=? AND state='open'", (job_id,)):
+            log.warning("Refusing to run an open channel collection batch")
+            return
         async with self._global:
             try:
                 await self._run_job_inner(job_id)
@@ -238,6 +242,9 @@ class Worker:
                 await self._tell_failure(job_id, e)
                 self.hub.finish(job_id)
             finally:
+                current = self.hub.get(job_id)
+                if current:
+                    current.finished = True
                 await self._reconcile(job_id)
 
     async def _tell_failure(self, job_id: str, err: Exception) -> None:
@@ -322,7 +329,37 @@ class Worker:
         # count instead of only reporting it.
         reasons: list[tuple[str, str]] = []
 
+        # Publish preparation before Drive folder creation and first byte.
+        preparation = ProgressState(job_id=job_id, user_id=user_id, name="Preparing job", count=len(items_all),
+                                    overall_bytes_done=base_done, overall_bytes_total=total_bytes,
+                                    stage="preparing", detail="Checking destination and preparing folders")
+        self.hub.put(preparation)
+        prep_anim = None
+        if msg_id:
+            from .animate import start_for
+            prep_anim = start_for(self, preparation, chat_id, msg_id)
         async with self.sem_for(user_id):
+            try:
+                # Materialize the approved tree, including empty folders. Resolver
+                # reuses same-named Drive folders on retry and caches per job.
+                split = (job.get("destination") or {}).get("split") or {}
+                if split.get("mode") == "tree":
+                    client = await self.accounts.client(user_id)
+                    resolver = self._resolvers.get(job_id)
+                    if resolver is None:
+                        resolver = self._resolvers[job_id] = groups.FolderResolver(
+                            client, (job.get("destination") or {}).get("folder_id") or "root")
+                    folder_chains = split.get("folders") or []
+                    for number, chain in enumerate(folder_chains, 1):
+                        preparation.detail = f"Preparing folder {number}/{len(folder_chains)}"
+                        self.hub.put(preparation)
+                        if self._stopping or self._cancel_flags.setdefault(job_id, asyncio.Event()).is_set():
+                            return
+                        await resolver.resolve(chain)
+            finally:
+                preparation.finished = True
+                if prep_anim:
+                    await prep_anim.stop()
             while True:
                 if self._stopping:
                     return
@@ -351,6 +388,10 @@ class Worker:
                 if fresh and fresh["status"] == "cancelled":
                     return
                 try:
+                    # Exclude this item's persisted checkpoint from the base;
+                    # its Drive bytes are added separately in the live state.
+                    totals = await repo.recompute_totals(self.db, job_id)
+                    base_done = max(0, int(totals["bytes_done"]) - (int(item.get("bytes_done") or 0) if item.get("state") in ("uploading", "verifying") else 0))
                     await self._process_item(job, item, totals, base_done,
                                              chat_id=chat_id, msg_id=msg_id)
                 except Cancelled:
@@ -394,10 +435,12 @@ class Worker:
         if links:
             text += "\n\n" + links[:3500]
         text = _emoji.apply(text, self.cfg, await repo.get_global(self.db))
-        await self._say(chat_id, text)
+        edited = False
         if msg_id:
             from ..tg.ratelimit import safe_edit
-            await safe_edit(self.bot, chat_id, msg_id, text, gate=self.fg, force=True)
+            edited = await safe_edit(self.bot, chat_id, msg_id, text, gate=self.fg, force=True)
+        if not edited:
+            await self._say(chat_id, text)
         self.hub.finish(job_id)
 
     async def _record_job_event(self, title: str, job: dict, item: dict, detail: str) -> None:
@@ -467,23 +510,69 @@ class Worker:
         except Exception as e:  # noqa: BLE001
             log.warning("upload audit/dump channel failed (upload remains successful): %s", e)
 
+    async def _protect_uploaded(self, job: dict, item: dict, drive: dict) -> None:
+        file_id = drive.get("file_id")
+        if not file_id:
+            raise DriveError("Upload returned no file ID; protection cannot be verified")
+        # Persist the completed file before protection, so a retry can protect it
+        # instead of creating a second copy.
+        drive["protection_pending"] = True
+        await repo.set_item(self.db, item["id"], drive=drive)
+        client = await self.accounts.client(job["user_id"])
+        try:
+            await client.restrict_downloads(file_id)
+        except Exception as e:
+            raise DriveError(f"File uploaded but download protection failed for {file_id}; retry protection: {e}") from e
+        drive["protection_pending"] = False
+        drive["protected"] = True
+        await repo.set_item(self.db, item["id"], drive=drive)
+        if job.get("share_mode") == "anyone":
+            try:
+                await client.share_anyone(file_id)
+            except DriveError:
+                log.warning("Could not enable link sharing for protected file %s", file_id)
+
     async def _process_item(self, job: dict, item: dict, totals: dict, base_done: int,
                             chat_id: int, msg_id: Optional[int]) -> None:
         job_id = job["id"]
         user_id = job["user_id"]
         tg = item["tg"]
         size = int(tg.get("size") or 0)
+        prior = item.get("drive") or {}
+        if prior.get("file_id") and prior.get("protection_pending"):
+            await self._protect_uploaded(job, item, prior)
+            await repo.set_item(self.db, item["id"], state="done", finished_at=time.time(),
+                                bytes_done=int(prior.get("committed") or size), drive=prior, error="")
+            await repo.add_quota(self.db, user_id, int(prior.get("committed") or size), 1)
+            await self._record_uploaded(job, item, prior, int(prior.get("committed") or size))
+            return
         items = await repo.items_of(self.db, job_id)
         count = len(items)
         index = item["seq_index"]
 
-        state = ProgressState(job_id=job_id, item_id=item["id"],
+        destination = job.get("destination") or {}
+        split = destination.get("split") or {}
+        folder_label = destination.get("path", "My Drive")
+        if split.get("mode") == "tree":
+            fid = (split.get("existing_plan") or {}).get(item["id"])
+            parts = (split.get("plan") or {}).get(item["id"], [])
+            folder_label = (split.get("existing_folders") or {}).get(fid, folder_label) if fid else " / ".join([folder_label, *parts])
+        elif split.get("mode") == "selected":
+            folder_id = (split.get("plan") or {}).get(item["id"], "")
+            folder_label = (split.get("destinations") or {}).get(folder_id, folder_label)
+        state = ProgressState(job_id=job_id, user_id=user_id, item_id=item["id"],
                               name=item["final_name"] or tg.get("name", ""),
-                              folder=(job.get("destination") or {}).get("path", "My Drive"),
+                              folder=folder_label,
                               index=index, count=count, total=size,
                               overall_bytes_done=base_done, overall_bytes_total=totals["bytes"],
+                              source_label="Browser" if tg.get("source_path") else ("Link" if tg.get("url") else "Telegram"),
                               cancel=self._cancel_flags.setdefault(job_id, asyncio.Event()))
+        state.drive_done = max(0, int(item.get("bytes_done") or 0))
         self.hub.put(state)
+        if tg.get("source_path"):
+            state.on_tg(size, size)
+            state.stage = "waiting"
+            self.hub.put(state)
         # The card used to change only at the start and end of a file, so on a
         # small file the user saw one frozen frame. This redraws it while the
         # bytes move — see core/animate.py.
@@ -495,67 +584,71 @@ class Worker:
 
         cfg = self.cfg
         mode = cfg.upload_mode
-        use_disk = mode == "disk" or (mode == "auto" and size > 0 and size < 32 * 1024 ** 2)
+        use_disk = bool(tg.get("source_path")) or mode == "disk" or (mode == "auto" and size > 0 and size < 32 * 1024 ** 2)
 
         session = item.get("drive") or {}
         drive_info: dict = {}
 
         # A link job carries its source in the item instead of a Telegram file.
         if (tg.get("url") or "").strip():
+            state.streaming = True
             try:
                 drive_info = await upload_from_url(self, job, item, state)
             finally:
                 if anim:
                     state.finished = True
                     await anim.stop()
+            await self._protect_uploaded(job, item, drive_info)
             await repo.set_item(self.db, item["id"], state="done", finished_at=time.time(),
                                 bytes_done=state.total, drive=drive_info, error="")
             await repo.add_quota(self.db, user_id, state.total, 1)
             await self._record_uploaded(job, item, drive_info, state.total)
             return
 
-        for attempt in range(1, 4):
-            try:
-                if use_disk:
-                    path = await self._download_to_disk(item, state)
-                    drive_info = await self._upload_from_disk(job, item, path, state)
-                else:
-                    drive_info = await self._upload_streamed(job, item, state)
-                break
-            except SessionGone:
-                if attempt >= 3:
+        try:
+            for attempt in range(1, 4):
+                try:
+                    if use_disk:
+                        path = await self._download_to_disk(item, state)
+                        drive_info = await self._upload_from_disk(job, item, path, state)
+                    else:
+                        state.streaming = True
+                        state.stage = "downloading"
+                        self.hub.put(state)
+                        drive_info = await self._upload_streamed(job, item, state)
+                    break
+                except SessionGone:
+                    if attempt >= 3:
+                        raise
+                    log.info("session gone for %s — new session", item["id"])
+                    await repo.set_item(self.db, item["id"], drive={})
+                except NetworkError:
+                    if attempt >= 3:
+                        raise
+                    state.note_retry()
+                    if self.fg:
+                        pass
+                    await asyncio.sleep(min(20, 2 ** attempt))
+                    st = await repo.get_item(self.db, item["id"])
+                    session = (st or {}).get("drive") or {}
+                    log.info("retrying %s (attempt %s) from %s", item["id"], attempt, session.get("committed"))
+                except StorageQuota:
                     raise
-                log.info("session gone for %s — new session", item["id"])
-                await repo.set_item(self.db, item["id"], drive={})
-            except NetworkError:
-                if attempt >= 3:
-                    raise
-                state.note_retry()
-                if self.fg:
-                    pass
-                await asyncio.sleep(min(20, 2 ** attempt))
-                st = await repo.get_item(self.db, item["id"])
-                session = (st or {}).get("drive") or {}
-                log.info("retrying %s (attempt %s) from %s", item["id"], attempt, session.get("committed"))
-            except StorageQuota:
-                raise
-            except BaseException:
-                if anim:
-                    state.finished = True
-                    await anim.stop()
-                raise
-        else:
-            raise DriveError("upload did not complete")
+            else:
+                raise DriveError("upload did not complete")
 
-        if anim:
-            state.stage = "done"
+        finally:
             state.finished = True
-            await anim.final()
-            await anim.stop()
+            if anim:
+                await anim.stop()
+        await self._protect_uploaded(job, item, drive_info)
         await repo.set_item(self.db, item["id"], state="done", finished_at=time.time(),
                             bytes_done=size, drive=drive_info, error="")
         await repo.add_quota(self.db, user_id, size, 1)
         await self._record_uploaded(job, item, drive_info, size)
+        source_path = (item.get("tg") or {}).get("source_path")
+        if source_path:
+            Path(source_path).unlink(missing_ok=True)
         fresh = await repo.recompute_totals(self.db, job_id)
         if msg_id:
             from ..tg.ratelimit import safe_edit
@@ -565,10 +658,13 @@ class Worker:
                                  elapsed=state.elapsed, eta=0, retries=state.retries,
                                  chunk_mb=cfg.chunk_bytes // 1024 // 1024,
                                  overall_pct=min(100, fresh["bytes_done"] * 100.0 / max(1, fresh["bytes"])),
-                                 style=cfg.progress_style)
-            await safe_edit(self.bot, chat_id, msg_id, text, gate=self.fg, pct=100, force=True)
+                                 style=cfg.progress_style, source_label=state.source_label,
+                                 tg_done=state.tg_done, drive_done=size, stage_label="FILE UPLOADED")
+            from .animate import progress_markup
+            await safe_edit(self.bot, chat_id, msg_id, text, reply_markup=progress_markup(state, cfg, chat_id),
+                            gate=self.fg, pct=100, force=True)
 
-    def _checkpoint(self, item_id: str, raw, holder: dict):
+    def _checkpoint(self, item_id: str, raw, holder: dict, state: ProgressState | None = None):
         """Persist the resumable session URI + committed offset as it moves.
 
         Without this a restart has nothing to resume from — which is precisely
@@ -586,21 +682,36 @@ class Worker:
                                            "committed": int(done)})
             except Exception as e:                        # noqa: BLE001
                 log.debug("checkpoint failed: %s", e)
+            if state is not None:
+                self.hub.put(state)
         return cb
 
     # ── byte paths ───────────────────────────────────────────────────────
     async def _download_to_disk(self, item: dict, state: ProgressState) -> Path:
         tg = item["tg"]
+        source_path = tg.get("source_path")
+        if source_path:
+            path = Path(source_path).resolve()
+            expected = int(tg.get("size") or 0)
+            if not path.is_file() or path.stat().st_size != expected:
+                raise DriveError("The staged browser upload is missing or incomplete. Remove it and upload again.")
+            return path
         os.makedirs(self.cfg.download_dir, exist_ok=True)
         safe = "".join(c for c in (tg.get("name") or "file") if c.isalnum() or c in "._- ")[:80]
         path = Path(self.cfg.download_dir) / f"{item['id']}_{safe}"
         if path.exists() and path.stat().st_size == int(tg.get("size") or 0):
+            state.on_tg(int(tg.get("size") or 0), int(tg.get("size") or 0))
+            self.hub.put(state)
             return path
-        # the download half reports 100% of the card's "Telegram → Server" bar
+        # Publish every byte checkpoint to both Telegram animation and Studio SSE.
         state.stage = "downloading"
+        self.hub.put(state)
+        async def report(done: int, total: int) -> None:
+            state.on_tg(done, total)
+            self.hub.put(state)
         await tg_download.download_to_file(
             self.bot, tg["file_id"], path,
-            progress=state.on_tg, should_stop=state.want_stop, timeout=3600)
+            progress=report, should_stop=state.want_stop, timeout=3600)
         if state.want_stop():
             path.unlink(missing_ok=True)
             raise Cancelled()
@@ -613,12 +724,24 @@ class Worker:
         split = dst.get("split") or {}
         if not split or (split.get("mode") or "none") in ("none", "off", ""):
             return {"folder_id": root, "path": ""}
+        if split.get("mode") == "tree" and item["id"] in (split.get("existing_plan") or {}):
+            folder_id = split["existing_plan"][item["id"]]
+            if not isinstance(folder_id, str) or not folder_id:
+                raise ValueError("Invalid existing destination for job item")
+            return {"folder_id": folder_id, "path": (split.get("existing_folders") or {}).get(folder_id, "")}
+        if split.get("mode") == "selected":
+            folder_id = (split.get("plan") or {}).get(item["id"])
+            if not isinstance(folder_id, str) or not folder_id:
+                raise ValueError("Missing destination for job item")
+            return {"folder_id": folder_id, "path": (split.get("destinations") or {}).get(folder_id, "")}
         key = job["id"]
         cache = self._folders.get(key)
         if cache is None:
             cache = self._folders[key] = {}
         chain = (split.get("plan") or {}).get(item["id"]) or []
-        if not chain:
+        if split.get("mode") == "tree" and item["id"] not in (split.get("plan") or {}):
+            raise ValueError("Missing tree destination for job item")
+        if not chain and split.get("mode") != "tree":
             # the job was created before the split was saved, or the Studio
             # changed it — compute on the fly (cheap, and deterministic)
             chain = groups.plan(dst, [item]).get(item["id"]) or []
@@ -635,13 +758,15 @@ class Worker:
     async def _upload_from_disk(self, job: dict, item: dict, path: Path,
                                 state: ProgressState) -> dict:
         naming = NamingOptions.from_dict(job.get("naming") or {})
+        state.stage = "uploading"
+        self.hub.put(state)
         client = await self.accounts.client(job["user_id"])
         dst = await self._folder_for(job, item, client)
         await repo.set_item(self.db, item["id"], state="uploading")
         session = (item.get("drive") or {})
         holder = {"uri": session.get("session_uri", ""), "committed": 0}
         up = client.uploader(chunk=self.cfg.chunk_bytes,
-                             on_progress=self._checkpoint(item["id"], state.on_drive, holder),
+                             on_progress=self._checkpoint(item["id"], state.on_drive, holder, state),
                              should_cancel=state.want_stop)
         if holder["uri"]:
             up.session_uri = holder["uri"]
@@ -661,17 +786,13 @@ class Worker:
             await _remember_uri()
             info = await up.upload(path, meta, path.stat().st_size)
         finally:
-            path.unlink(missing_ok=True)
+            if not (item.get("tg") or {}).get("source_path"):
+                path.unlink(missing_ok=True)
         drive = {"file_id": info.get("id", ""), "link": info.get("webViewLink", ""),
                  "session_uri": "", "committed": info.get("size", 0)}
         if not drive["link"] and drive["file_id"]:
             meta = await client.get(drive["file_id"])
             drive["link"] = meta.get("webViewLink", "")
-        if job.get("share_mode") == "anyone" and drive["file_id"]:
-            try:
-                await client.share_anyone(drive["file_id"])
-            except DriveError:
-                pass
         return drive
 
     async def _upload_streamed(self, job: dict, item: dict, state: ProgressState) -> dict:
@@ -692,6 +813,7 @@ class Worker:
                         timeout=3600):
                     done += len(piece)
                     await _fire(state.on_tg, min(done, size or done), size or done)
+                    self.hub.put(state)
                     await _put(queue, piece)
                 await _put(queue, None)
             except BaseException as e:               # noqa: BLE001
@@ -712,7 +834,7 @@ class Worker:
         session = (item.get("drive") or {})
         holder = {"uri": session.get("session_uri", ""), "committed": 0}
         up = client.uploader(chunk=chunk,
-                             on_progress=self._checkpoint(item["id"], state.on_drive, holder),
+                             on_progress=self._checkpoint(item["id"], state.on_drive, holder, state),
                              should_cancel=state.want_stop)
         if holder["uri"]:
             up.session_uri = holder["uri"]
@@ -743,11 +865,6 @@ class Worker:
             raise Cancelled()
         drive = {"file_id": info.get("id", ""), "link": info.get("webViewLink", ""),
                  "session_uri": "", "committed": info.get("size", size)}
-        if job.get("share_mode") == "anyone" and drive["file_id"]:
-            try:
-                await client.share_anyone(drive["file_id"])
-            except DriveError:
-                pass
         return drive
 
     # ── notifications ────────────────────────────────────────────────────

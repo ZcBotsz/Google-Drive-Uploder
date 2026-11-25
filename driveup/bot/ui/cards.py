@@ -119,7 +119,9 @@ def progress_card(*, index: int, count: int, name: str, folder: str,
                   speed: float = 0.0, elapsed: float = 0.0, eta: Optional[float] = None,
                   retries: int = 0, chunk_mb: int = 8, overall_pct: float = 0.0,
                   frame: int = 0, style: str = "glow", paused: bool = False,
-                  stage_label: str = "UPLOADING TO DRIVE") -> str:
+                  stage_label: str = "PREPARING TRANSFER", source_label: str = "Telegram",
+                  tg_done: Optional[int] = None, drive_done: Optional[int] = None,
+                  detail: str = "") -> str:
     """The live card. Every line that can move, moves.
 
     Redrawn about twice a second by core/animate.py, so the spinner turns, the
@@ -129,28 +131,28 @@ def progress_card(*, index: int, count: int, name: str, folder: str,
     sp = spinner(frame)
     pl = pulse(frame)
     dt = dots(frame)
-    title = "⏸ PAUSED" if paused else stage_label
+    title = "⏸ PAUSE REQUESTED (AFTER CURRENT FILE)" if paused else stage_label
     left = max(0, total - done)
     eta_txt = human_secs(eta) if eta is not None else "—"
-    pct_big = overall_pct if overall_pct else (tg_pct + drive_pct) / 2 if total else 0
+    pct_big = overall_pct
     # a ten-cell "fuel gauge" that fills with the overall percentage
     gauge = bar(pct_big, 10, style, frame)
     lines = [
         f"📄 {esc(shorten(name, 42))}",
         f"📁 {esc(shorten(folder, 44))}",
         "",
-        f"⬇️ {sc('telegram → server')}",
-        f"[{bar(tg_pct, 20, style, frame)}] {tg_pct:5.1f}%",
-        f"⬆️ {sc('server → drive')}",
-        f"[{bar(drive_pct, 20, style, frame + 3)}] {drive_pct:5.1f}%",
+        f"⬇️ {esc(source_label)} to server",
+        f"[{bar(tg_pct, 16, style, frame)}] {tg_pct:5.1f}%" + (f"  {human_size(tg_done)} / {human_size(total)}" if tg_done is not None else ""),
+        "⬆️ Server to Google Drive",
+        f"[{bar(drive_pct, 16, style, frame + 3)}] {drive_pct:5.1f}%" + (f"  {human_size(drive_done)} / {human_size(total)}" if drive_done is not None else ""),
         "",
-        f"{runner(frame, overall_pct)}",
-        f"📦 {human_size(done)} / {human_size(total)}",
-        f"{sc('left')} {human_size(left)}   ⚡ {speed_text(speed)}",
-        f"{human_secs(elapsed)}   {sc('eta')} {eta_txt}",
-        f"{sc('retries')} {retries}   {chunk_mb} MB   {index}/{count}",
+        *( [esc(shorten(detail, 52))] if detail else [] ),
+        f"Current stage: {human_size(done)} / {human_size(total)}",
+        f"Left {human_size(left)}   ⚡ {speed_text(speed)}",
+        f"{human_secs(elapsed)}   ETA {eta_txt}",
+        f"Retries {retries}   {chunk_mb} MB   {index}/{count}",
         "",
-        f"[{gauge}] {pct_big:3.0f}%  {sc('overall')}",
+        f"[{gauge}] {pct_big:3.0f}%  Overall Drive progress",
     ]
     # Keep the heading outside <pre>: Telegram renders custom emoji tags in the
     # caption/header, while the ASCII progress bars remain monospaced and legible.

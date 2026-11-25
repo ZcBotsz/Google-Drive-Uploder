@@ -89,6 +89,11 @@ def test_file_server_url_swaps_the_work_dir_prefix():
     got = file_server_url(bot, "/var/lib/telegram-bot-api/123/documents/f.pdf",
                           bot.files_work_dir)
     assert got == "http://tg-bot-api.railway.internal:8080/123/documents/f.pdf"
+    # stream_file_id/download_to_file strip a leading slash before invoking
+    # stream_download; that form must strip the same work-dir prefix too.
+    got = file_server_url(bot, "var/lib/telegram-bot-api/123/documents/f.pdf",
+                          bot.files_work_dir)
+    assert got == "http://tg-bot-api.railway.internal:8080/123/documents/f.pdf"
 
 
 def test_no_file_server_configured_means_no_rewrite():

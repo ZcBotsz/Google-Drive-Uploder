@@ -12,7 +12,7 @@ from .upload import ResumableUploader
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
 FIELDS_FILE = "id,name,mimeType,size,webViewLink,parents,createdTime,modifiedTime,md5Checksum"
-FIELDS_LIST = f"nextPageToken,files({FIELDS_FILE})"
+FIELDS_LIST = f"nextPageToken,files({FIELDS_FILE},capabilities(canAddChildren))"
 
 
 class DriveClient:
@@ -62,15 +62,21 @@ class DriveClient:
     # ── about / quota ────────────────────────────────────────────────────
     async def about(self) -> dict:
         data = await self._call("GET", f"{self.API}/about", params={
-            "fields": "user(displayName,emailAddress),storageQuota(limit,usage,usageInDrive)",
+            "fields": "user(displayName,emailAddress),storageQuota(limit,usage,usageInDrive,usageInDriveTrash)",
             "supportsAllDrives": "true",
         })
         user = data.get("user", {})
         q = data.get("storageQuota", {})
         limit = int(q.get("limit", 0) or 0)
+        usage_reported = "usage" in q
         usage = int(q.get("usage", 0) or 0)
+        drive_used = int(q["usageInDrive"] or 0) if "usageInDrive" in q else None
+        drive_trash = int(q["usageInDriveTrash"] or 0) if "usageInDriveTrash" in q else None
         return {"email": user.get("emailAddress", ""), "name": user.get("displayName", ""),
-                "limit": limit, "usage": usage, "free": max(0, limit - usage) if limit else -1}
+                "limit": limit, "usage": usage, "usage_reported": usage_reported,
+                "drive_used": drive_used, "drive_trash_used": drive_trash,
+                "other_services_used": max(0, usage - drive_used) if drive_used is not None and usage_reported else None,
+                "free": max(0, limit - usage) if limit and usage_reported else -1}
 
     # ── folders ──────────────────────────────────────────────────────────
     async def list_children(self, parent: str = "root", *, page_token: str = "",
@@ -93,6 +99,18 @@ class DriveClient:
         return await self.list_children(parent, page_token=page_token, page_size=page_size,
                                         q_extra=f"mimeType='{FOLDER_MIME}'")
 
+    async def shared_folders(self, *, page_token: str = "", page_size: int = 100) -> dict:
+        """Folders in the connected user's Shared with me collection, within the granted scope."""
+        params = {"q": f"sharedWithMe = true and trashed = false and mimeType = '{FOLDER_MIME}'",
+                  "pageSize": str(min(1000, max(1, page_size))),
+                  "fields": "nextPageToken,files(id,name,mimeType,capabilities(canAddChildren))",
+                  "orderBy": "name", "supportsAllDrives": "true",
+                  "includeItemsFromAllDrives": "true", "corpora": "user"}
+        if page_token:
+            params["pageToken"] = page_token
+        data = await self._call("GET", f"{self.API}/files", params=params)
+        return {"files": data.get("files", []), "next": data.get("nextPageToken", "")}
+
     async def search(self, term: str, *, folders_only: bool = False,
                      page_size: int = 50) -> List[dict]:
         term = (term or "").replace("'", "\\'")[:200]
@@ -114,7 +132,7 @@ class DriveClient:
 
     async def get(self, file_id: str) -> dict:
         return await self._call("GET", f"{self.API}/files/{file_id}", params={
-            "fields": FIELDS_FILE, "supportsAllDrives": "true"})
+            "fields": FIELDS_FILE + ",trashed,capabilities(canAddChildren)", "supportsAllDrives": "true"})
 
     async def path_of(self, file_id: str, depth: int = 8) -> tuple[str, str]:
         """`My Drive › Courses › Module 1` + the id path (root last)."""
@@ -165,6 +183,48 @@ class DriveClient:
     async def delete(self, file_id: str) -> None:
         await self._call("DELETE", f"{self.API}/files/{file_id}", params={"supportsAllDrives": "true"},
                          expect=(200, 204))
+
+    async def restrict_downloads(self, file_id: str) -> None:
+        """Restrict download/copy/print for readers and writers, and verify."""
+        data = await self._call("PATCH", f"{self.API}/files/{file_id}", params={
+            "supportsAllDrives": "true",
+            "fields": "id,downloadRestrictions(itemDownloadRestriction(restrictedForReaders,restrictedForWriters))"},
+            json_body={"downloadRestrictions": {"itemDownloadRestriction": {
+                "restrictedForReaders": True, "restrictedForWriters": True}}})
+        r = (data.get("downloadRestrictions") or {}).get("itemDownloadRestriction") or {}
+        if not r.get("restrictedForWriters"):
+            raise DriveError("Download protection could not be verified for file " + file_id)
+
+    async def protection_inventory(self, folder_id: str, *, max_items: int = 2000) -> list[dict]:
+        """Collect files first: no mutation if listing fails or exceeds the cap.
+
+        Shortcuts are excluded; following them could unexpectedly modify a different tree.
+        """
+        root = await self.get(folder_id)
+        if root.get("mimeType") != FOLDER_MIME:
+            raise DriveError("The link must point to a folder")
+        pending, seen, files = [folder_id], {folder_id}, []
+        count = 0
+        while pending:
+            parent, page = pending.pop(), ""
+            while True:
+                result = await self.list_children(parent, page_token=page, page_size=200)
+                for f in result.get("files", []):
+                    count += 1
+                    if count > max_items:
+                        raise DriveError(f"Folder exceeds the {max_items} item safety limit; nothing changed")
+                    fid, mime = f.get("id"), f.get("mimeType", "")
+                    if not fid or fid in seen:
+                        continue
+                    seen.add(fid)
+                    if mime == FOLDER_MIME:
+                        pending.append(fid)
+                    elif mime != "application/vnd.google-apps.shortcut":
+                        files.append({"id": fid, "name": f.get("name", "")})
+                page = result.get("next", "")
+                if not page:
+                    break
+        return files
 
     # ── upload ───────────────────────────────────────────────────────────
     def uploader(self, *, chunk: int, on_progress=None, should_cancel=None,
@@ -226,7 +286,10 @@ class DriveClient:
         one idea in that repo worth keeping — re-uploading to duplicate a file
         wastes bandwidth and the user's daily quota.
         """
-        body = {"parents": [parent]} if parent and parent != "root" else {}
+        source = await self.get(file_id)
+        body = {"name": source["name"]}
+        if parent and parent != "root":
+            body["parents"] = [parent]
         return await self._call("POST", f"{self.API}/files/{file_id}/copy", params={
             "supportsAllDrives": "true", "fields": FIELDS_FILE}, json_body=body)
 

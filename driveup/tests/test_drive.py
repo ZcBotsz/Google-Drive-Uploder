@@ -213,6 +213,8 @@ async def test_about_reports_quota(drive, http):
     about = await c.about()
     assert about["email"] == "tester@example.com"
     assert about["limit"] == fd.quota_limit
+    assert about["drive_used"] == about["usage"]
+    assert about["other_services_used"] == 0
 
 
 @pytest.mark.asyncio
